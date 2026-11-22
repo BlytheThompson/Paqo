@@ -5,6 +5,7 @@ import Foundation
 ///     <directory>/index.json          summaries of every run (fast to load)
 ///     <directory>/runs/<id>.json      full run with route
 ///     <directory>/in-progress.json    autosave of the run being recorded
+///     <directory>/heatmap.json        simplified routes of every run (rebuildable)
 ///
 /// Not thread-safe; use from one actor (the app uses it on the main actor).
 public final class RunStore {
@@ -29,6 +30,7 @@ public final class RunStore {
     var runsDirectory: URL { directory.appendingPathComponent("runs", isDirectory: true) }
     var indexURL: URL { directory.appendingPathComponent("index.json") }
     var inProgressURL: URL { directory.appendingPathComponent("in-progress.json") }
+    var heatmapURL: URL { directory.appendingPathComponent("heatmap.json") }
     func runURL(_ id: UUID) -> URL { runsDirectory.appendingPathComponent("\(id.uuidString).json") }
 
     // MARK: - Runs
@@ -51,6 +53,10 @@ public final class RunStore {
         summaries.removeAll { $0.id == run.id }
         summaries.append(summary)
         try writeIndex(summaries)
+        updateHeatmapCache { routes in
+            routes.removeAll { $0.id == run.id }
+            routes.append(HeatmapBuilder.route(for: run))
+        }
         return summary
     }
 
@@ -67,6 +73,41 @@ public final class RunStore {
         var summaries = (try? loadSummaries()) ?? []
         summaries.removeAll { $0.id == id }
         try writeIndex(summaries)
+        updateHeatmapCache { routes in routes.removeAll { $0.id == id } }
+    }
+
+    // MARK: - Heatmap
+
+    /// Every run's simplified route, oldest first. Fills in runs missing from the
+    /// cache (old runs, or a deleted cache) and drops runs that no longer exist.
+    public func loadHeatmapRoutes() throws -> [HeatmapRoute] {
+        var routes = cachedHeatmap() ?? []
+        let summaries = try loadSummaries()
+        let ids = Set(summaries.map(\.id))
+        var changed = routes.contains { !ids.contains($0.id) }
+        routes.removeAll { !ids.contains($0.id) }
+        let cached = Set(routes.map(\.id))
+        for summary in summaries where !cached.contains(summary.id) {
+            guard let run = try? loadRun(id: summary.id) else { continue }
+            routes.append(HeatmapBuilder.route(for: run))
+            changed = true
+        }
+        if changed || !fileManager.fileExists(atPath: heatmapURL.path) {
+            try? write(routes, to: heatmapURL)
+        }
+        return routes.sorted { $0.startDate < $1.startDate }
+    }
+
+    func cachedHeatmap() -> [HeatmapRoute]? {
+        guard let data = try? Data(contentsOf: heatmapURL) else { return nil }
+        return try? decoder.decode([HeatmapRoute].self, from: data)
+    }
+
+    /// Keeps an existing cache in step; a missing cache is built when first needed.
+    func updateHeatmapCache(_ change: (inout [HeatmapRoute]) -> Void) {
+        guard var routes = cachedHeatmap() else { return }
+        change(&routes)
+        try? write(routes, to: heatmapURL)
     }
 
     @discardableResult
