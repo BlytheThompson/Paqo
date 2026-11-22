@@ -276,6 +276,8 @@ public struct RunSummary: Codable, Identifiable, Hashable, Sendable {
     /// Non-optional on purpose: a v1 index without it fails to decode and is rebuilt
     /// from the run files.
     public var sprintStats: SprintStats
+    /// Which detection version measured the run (nil for v1).
+    public var engineVersion: Int?
 
     public init(run: Run) {
         id = run.id
@@ -304,6 +306,7 @@ public struct RunSummary: Codable, Identifiable, Hashable, Sendable {
             distances: EffortDistance.standard.map(\.meters)
         )
         savedToHealth = run.savedToHealth
+        engineVersion = run.engineVersion
     }
 
     /// Seconds per meter.

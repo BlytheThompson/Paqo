@@ -103,4 +103,11 @@ final class SprintAnalysisTests: XCTestCase {
         XCTAssertEqual(records.fastestSprint?.value ?? 0, 5, accuracy: 0.01)
         XCTAssertEqual(records.fastestSprint?.runID, fast.id)
     }
+
+    func testSummaryCarriesEngineVersion() {
+        XCTAssertEqual(RunSummary(run: threeSprintRun()).engineVersion, 2)
+        var old = threeSprintRun()
+        old.engineVersion = nil
+        XCTAssertNil(RunSummary(run: old).engineVersion)
+    }
 }

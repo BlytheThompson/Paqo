@@ -14,8 +14,11 @@ struct SettingsView: View {
     @State private var locationStatus = CLLocationManager().authorizationStatus
     @State private var motionStatus = MotionService.authorizationStatus
 
-    @State private var choosingFolder = false
-    @State private var importing = false
+    /// One file picker serves both buttons: SwiftUI can drop a second
+    /// `.fileImporter` in the same view.
+    private enum PickerPurpose { case backupFolder, importRuns }
+    @State private var pickerPurpose = PickerPurpose.importRuns
+    @State private var showingPicker = false
     @State private var exporting = false
     @State private var sharedFile: SharedFile?
     @State private var message: String?
@@ -77,6 +80,19 @@ struct SettingsView: View {
             .background(Theme.background.ignoresSafeArea())
             .navigationTitle("Settings")
             .onAppear(perform: refresh)
+            .fileImporter(
+                isPresented: $showingPicker,
+                allowedContentTypes: pickerPurpose == .backupFolder ? [.folder] : [.folder, .zip, .json],
+                allowsMultipleSelection: pickerPurpose == .importRuns
+            ) { result in
+                guard case .success(let urls) = result, !urls.isEmpty else { return }
+                switch pickerPurpose {
+                case .backupFolder:
+                    library.backup.chooseFolder(urls[0], library: library)
+                case .importRuns:
+                    Task { message = await library.backup.importRuns(from: urls, library: library) }
+                }
+            }
             .sheet(item: $sharedFile) { file in
                 ShareSheet(items: [file.url])
             }
@@ -96,7 +112,8 @@ struct SettingsView: View {
     private var backupSection: some View {
         Section {
             Button {
-                choosingFolder = true
+                pickerPurpose = .backupFolder
+                showingPicker = true
             } label: {
                 HStack {
                     Text("Auto-backup folder")
@@ -108,11 +125,6 @@ struct SettingsView: View {
                 }
             }
             .listRowBackground(Theme.surface)
-            .fileImporter(isPresented: $choosingFolder, allowedContentTypes: [.folder]) { result in
-                if case .success(let url) = result {
-                    library.backup.chooseFolder(url, library: library)
-                }
-            }
 
             if library.backup.folderName != nil {
                 HStack {
@@ -153,14 +165,10 @@ struct SettingsView: View {
             .listRowBackground(Theme.surface)
 
             Button("Import runs") {
-                importing = true
+                pickerPurpose = .importRuns
+                showingPicker = true
             }
             .listRowBackground(Theme.surface)
-            .fileImporter(isPresented: $importing, allowedContentTypes: [.folder, .zip, .json], allowsMultipleSelection: true) { result in
-                if case .success(let urls) = result {
-                    Task { message = await library.backup.importRuns(from: urls, library: library) }
-                }
-            }
         } header: {
             Text("Backup")
         } footer: {

@@ -13,15 +13,27 @@ import Foundation
 /// can't shrink or wipe an existing backup. Nothing is ever erased: a deleted run's
 /// files move to `deleted/`. When a CSV no longer matches (unit switched, file
 /// damaged) it is rebuilt from the JSON files in the folder, never from the app.
+public enum BackupError: Error, Equatable {
+    /// The file is in the cloud but not on this phone yet; try again later.
+    case notDownloaded(String)
+    /// The file is there but couldn't be read.
+    case unreadable(String)
+}
+
 public struct BackupWriter: Sendable {
     public static let folderName = "Paqo Backup"
     public let root: URL
+    /// The "Paqo Backup" folder itself. If the owner picked that folder (say after a
+    /// reinstall), it is used as-is instead of nesting a new one inside it.
+    let base: URL
 
     public init(root: URL) {
         self.root = root
+        let pickedBackupItself = root.lastPathComponent == Self.folderName
+            || FileManager.default.fileExists(atPath: root.appendingPathComponent("runs.csv").path)
+        base = pickedBackupItself ? root : root.appendingPathComponent(Self.folderName, isDirectory: true)
     }
 
-    var base: URL { root.appendingPathComponent(Self.folderName, isDirectory: true) }
     var runsFolder: URL { base.appendingPathComponent("runs", isDirectory: true) }
     var deletedFolder: URL { base.appendingPathComponent("deleted", isDirectory: true) }
 
@@ -88,9 +100,10 @@ public struct BackupWriter: Sendable {
         try merge(file: "sprints.csv", header: BackupCSV.sprintsHeader(unit: currentUnit), removing: runID, adding: [], unit: currentUnit, timeZone: timeZone)
     }
 
-    /// Rebuilds both CSVs from the JSON files in `runs/`.
+    /// Rebuilds both CSVs from the JSON files in `runs/`. Throws rather than writing a
+    /// shorter CSV when a run file is in the cloud but not downloaded, or unreadable.
     public func rebuildCSVs(unit: DistanceUnit, timeZone: TimeZone) throws {
-        let runs = jsonRuns()
+        let runs = try jsonRuns()
         var runRows: [[String]] = []
         var sprintRows: [[String]] = []
         for run in runs {
@@ -137,12 +150,35 @@ public struct BackupWriter: Sendable {
         }.sorted { $0.lastPathComponent < $1.lastPathComponent }
     }
 
-    func jsonRuns() -> [Run] {
+    func jsonRuns() throws -> [Run] {
         let items = (try? FileManager.default.contentsOfDirectory(at: runsFolder, includingPropertiesForKeys: nil)) ?? []
-        return items
-            .filter { $0.pathExtension == "json" }
-            .compactMap { try? RunJSON.decode(Data(contentsOf: $0)) }
-            .sorted { $0.startDate < $1.startDate }
+        var runs: [Run] = []
+        for item in items.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
+            let name = item.lastPathComponent
+            if let original = Self.evictedName(name), original.hasSuffix(".json") {
+                throw BackupError.notDownloaded(original)
+            }
+            guard item.pathExtension == "json" else { continue }
+            guard let data = try? Data(contentsOf: item) else { throw BackupError.unreadable(name) }
+            // A file that isn't a Paqo run can't be listed anyway; skip it.
+            if let run = try? RunJSON.decode(data) { runs.append(run) }
+        }
+        return runs.sorted { $0.startDate < $1.startDate }
+    }
+
+    /// Files in the backup that are in the cloud but not on this phone (their real
+    /// names), so the app can ask for them to be downloaded before retrying.
+    public func evictedItems() -> [URL] {
+        [base, runsFolder].flatMap { folder -> [URL] in
+            let names = (try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []
+            return names.sorted().compactMap { Self.evictedName($0).map { folder.appendingPathComponent($0) } }
+        }
+    }
+
+    /// iCloud leaves ".name.icloud" in place of a file it moved off the phone.
+    static func evictedName(_ name: String) -> String? {
+        guard name.hasPrefix("."), name.hasSuffix(".icloud"), name.count > 8 else { return nil }
+        return String(name.dropFirst().dropLast(7))
     }
 
     func existingUnit() -> DistanceUnit? {
@@ -155,8 +191,10 @@ public struct BackupWriter: Sendable {
 
     func merge(file: String, header: [String], removing id: UUID, adding: [[String]], unit: DistanceUnit, timeZone: TimeZone) throws {
         let url = base.appendingPathComponent(file)
+        let fm = FileManager.default
         var rows: [[String]] = []
-        if let data = try? Data(contentsOf: url) {
+        if fm.fileExists(atPath: url.path) {
+            guard let data = try? Data(contentsOf: url) else { throw BackupError.unreadable(file) }
             let parsed = CSV.parse(String(decoding: data, as: UTF8.self))
             let body = Array(parsed.dropFirst())
             guard parsed.first == header, body.allSatisfy({ $0.count == header.count }) else {
@@ -165,6 +203,13 @@ public struct BackupWriter: Sendable {
                 return
             }
             rows = body
+        } else if fm.fileExists(atPath: base.appendingPathComponent("." + file + ".icloud").path) {
+            // In the cloud but not on this phone: wait rather than replace it with less.
+            throw BackupError.notDownloaded(file)
+        } else {
+            // Missing (deleted or moved on the computer): rebuild from the folder's JSON.
+            try rebuildCSVs(unit: unit, timeZone: timeZone)
+            return
         }
         let idText = id.uuidString
         rows.removeAll { $0.first == idText }

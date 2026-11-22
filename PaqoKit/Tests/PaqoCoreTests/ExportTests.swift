@@ -100,4 +100,13 @@ final class ExportTests: XCTestCase {
         XCTAssertEqual(row[header.firstIndex(of: "moving_time")!], "25:00")
         XCTAssertFalse(BackupReadme.text(unit: .miles).isEmpty)
     }
+
+    func testThreeHourRunExportsQuickly() throws {
+        let track = straightTrack(segments: [(10_800, 2.5)])
+        let run = Run(name: "Long", startDate: t0, endDate: t0.addingTimeInterval(10_800), distance: 27_000, movingTime: 10_800, track: track)
+        let started = Date()
+        _ = try RunJSON.encode(run)
+        _ = GPX.document(for: run)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 1.0)
+    }
 }

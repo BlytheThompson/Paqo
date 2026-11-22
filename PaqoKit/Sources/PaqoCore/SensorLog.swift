@@ -247,20 +247,24 @@ public enum SensorLogCodec {
 
 /// ISO 8601 with milliseconds, e.g. "2026-11-22T07:12:03.120Z".
 enum ISO8601 {
-    static func string(from date: Date) -> String {
-        formatter().string(from: date)
-    }
-
-    static func date(from text: String) -> Date? {
-        if let d = formatter().date(from: text) { return d }
-        let plain = ISO8601DateFormatter()
-        plain.formatOptions = [.withInternetDateTime]
-        return plain.date(from: text)
-    }
-
-    static func formatter() -> ISO8601DateFormatter {
+    /// ISO8601DateFormatter is thread-safe; creating one per date made exports slow.
+    static let withMilliseconds: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
         f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return f
+    }()
+
+    static let plain: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime]
+        return f
+    }()
+
+    static func string(from date: Date) -> String {
+        withMilliseconds.string(from: date)
+    }
+
+    static func date(from text: String) -> Date? {
+        withMilliseconds.date(from: text) ?? plain.date(from: text)
     }
 }

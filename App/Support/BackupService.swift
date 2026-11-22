@@ -78,11 +78,7 @@ final class BackupService {
         guard let folder = resolveFolder(reportProblems: true) else { return }
         let saves = pendingSaves.sorted { $0.uuidString < $1.uuidString }
         let deletes = pendingDeletes.sorted { $0.uuidString < $1.uuidString }
-        let runs = saves.compactMap { library.loadRun(id: $0) }
-        // Runs that no longer exist locally can't be backed up; drop them.
-        let missing = Set(saves).subtracting(runs.map(\.id))
-        pendingSaves.subtract(missing)
-        guard !runs.isEmpty || !deletes.isEmpty else { return }
+        guard !saves.isEmpty || !deletes.isEmpty else { return }
 
         let unit = defaults.distanceUnit
         let timeZone = TimeZone.current
@@ -90,10 +86,19 @@ final class BackupService {
         isWorking = true
         chain = Task { [weak self] in
             await previous?.value
+            // Loaded off the main thread: choosing a folder backs up every run.
+            let runs = await library.loadRuns(ids: saves)
+            guard !runs.isEmpty || !deletes.isEmpty else {
+                // Runs that no longer exist locally can't be backed up; drop them.
+                self?.pendingSaves.subtract(saves)
+                self?.isWorking = false
+                return
+            }
             let result = await Task.detached(priority: .utility) {
                 BackupService.write(folder: folder, runs: runs, deletions: deletes, unit: unit, timeZone: timeZone)
             }.value
-            self?.finish(result, saved: runs.map(\.id), deleted: deletes)
+            // `saves` includes runs that no longer exist; finish drops them too.
+            self?.finish(result, saved: saves, deleted: deletes)
         }
     }
 
@@ -126,16 +131,25 @@ final class BackupService {
             let writer = BackupWriter(root: url)
             result.failedSaves = []
             result.failedDeletes = []
+            var waitingForCloud = false
             for run in runs {
                 do { try writer.save(run, unit: unit, timeZone: timeZone) } catch {
                     result.failedSaves.append(run.id)
-                    result.error = error.localizedDescription
+                    result.error = message(for: error)
+                    if case BackupError.notDownloaded = error { waitingForCloud = true }
                 }
             }
             for id in deletions {
                 do { try writer.delete(runID: id, unit: unit, timeZone: timeZone) } catch {
                     result.failedDeletes.append(id)
-                    result.error = error.localizedDescription
+                    result.error = message(for: error)
+                    if case BackupError.notDownloaded = error { waitingForCloud = true }
+                }
+            }
+            if waitingForCloud {
+                // Ask iCloud to bring the files back so the retry can finish.
+                for item in writer.evictedItems() {
+                    try? FileManager.default.startDownloadingUbiquitousItem(at: item)
                 }
             }
         }
@@ -143,11 +157,19 @@ final class BackupService {
         return result
     }
 
+    nonisolated private static func message(for error: Error) -> String {
+        switch error {
+        case BackupError.notDownloaded(let name): return "\(name) is still downloading from iCloud"
+        case BackupError.unreadable(let name): return "couldn't read \(name)"
+        default: return error.localizedDescription
+        }
+    }
+
     // MARK: - Export and import
 
     /// Every run as one zip (CSV, JSON, GPX and a README), ready for the share sheet.
     func exportAll(library: RunLibrary) async throws -> URL {
-        let runs = library.allRuns()
+        let runs = await library.loadRuns(ids: library.summaries.map(\.id))
         let unit = defaults.distanceUnit
         let timeZone = TimeZone.current
         let formatter = DateFormatter()

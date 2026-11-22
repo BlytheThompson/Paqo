@@ -344,4 +344,19 @@ final class RunEngineTests: XCTestCase {
         XCTAssertEqual(Run.defaultName(for: at(18), calendar: calendar), "Evening Run")
         XCTAssertEqual(Run.defaultName(for: at(23), calendar: calendar), "Night Run")
     }
+
+    func testRunWithoutGPSHasNoZeroDistanceSprint() {
+        // Treadmill or indoors: the feet say sprint for 10 minutes but there is no GPS.
+        var trace = TraceBuilder()
+        trace.move(seconds: 600, speed: 4)
+        var engine = RunEngine()
+        for event in trace.events() {
+            if case .location = event { continue }
+            engine.apply(event)
+        }
+        let run = engine.finish(at: trace.time)
+        XCTAssertTrue(run.sprints.isEmpty, "a sprint with no distance is not a sprint")
+        XCTAssertEqual(run.segments.map(\.kind), [.walk])
+        XCTAssertEqual(RunSummary(run: run).longestSprintDuration, 0)
+    }
 }

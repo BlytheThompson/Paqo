@@ -107,6 +107,12 @@ public final class SensorLogStore {
         return files
     }
 
+    /// Just the log's description (reads only meta.json).
+    public func meta(runID: UUID) -> SensorLogMeta? {
+        guard let data = try? Data(contentsOf: folder(runID).appendingPathComponent("meta.json")) else { return nil }
+        return try? SensorLogCodec.decode(files: ["meta.json": String(decoding: data, as: UTF8.self)]).meta
+    }
+
     public func load(runID: UUID) throws -> SensorLog {
         try SensorLogCodec.decode(files: files(runID: runID))
     }
@@ -127,9 +133,7 @@ public final class SensorLogStore {
     /// Keeps the `keep` newest logs (by start date) plus `protecting`.
     public func prune(keep: Int, protecting: UUID?) {
         let dated: [(id: UUID, start: Date)] = runIDs().map { id in
-            let meta = (try? files(runID: id)["meta.json"]).flatMap { $0 }
-                .flatMap { try? SensorLogCodec.decode(files: ["meta.json": $0]).meta }
-            return (id, meta?.startDate ?? .distantPast)
+            (id, meta(runID: id)?.startDate ?? .distantPast)
         }
         let newestFirst = dated.sorted { $0.start != $1.start ? $0.start > $1.start : $0.id.uuidString < $1.id.uuidString }
         for (index, entry) in newestFirst.enumerated() where index >= keep && entry.id != protecting {

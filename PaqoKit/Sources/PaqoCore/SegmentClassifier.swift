@@ -178,7 +178,6 @@ public enum SegmentSmoother {
         minSprintDistance: Double = 15,
         minWalkDuration: TimeInterval = 5
     ) -> [RunSegment] {
-        guard segments.count > 1 else { return recomputeTopSpeeds(segments, track: track) }
         var result = segments
 
         // 1. A very short walk between two sprints is part of one sprint (a stumble).

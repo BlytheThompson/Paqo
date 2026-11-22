@@ -50,8 +50,13 @@ final class RunLibrary {
         try? store?.loadRun(id: id)
     }
 
-    func allRuns() -> [Run] {
-        summaries.compactMap { loadRun(id: $0.id) }
+    /// Loads runs off the main thread (a long history is slow to decode).
+    func loadRuns(ids: [UUID]) async -> [Run] {
+        guard let directory = store?.directory, !ids.isEmpty else { return [] }
+        return await Task.detached(priority: .userInitiated) {
+            guard let store = try? RunStore(directory: directory) else { return [] }
+            return ids.compactMap { try? store.loadRun(id: $0) }
+        }.value
     }
 
     func delete(id: UUID) {
@@ -104,26 +109,23 @@ final class RunLibrary {
     /// Runs that still have a sensor log but were measured by older detection settings.
     func reprocessCandidates() -> [UUID] {
         guard let logs else { return [] }
-        let known = Set(summaries.map(\.id))
-        return logs.runIDs().filter { id in
-            guard known.contains(id), let run = loadRun(id: id) else { return false }
-            return (run.engineVersion ?? 1) < RunEngine.version
-        }
+        let outdated = Set(summaries.filter { ($0.engineVersion ?? 1) < RunEngine.version }.map(\.id))
+        return logs.runIDs().filter(outdated.contains)
     }
 
     /// Re-runs each run through today's detection, without saving anything.
     func reprocessPreview(ids: [UUID]) async -> [ReprocessItem] {
-        guard let logs else { return [] }
-        var inputs: [(Run, SensorLog, RunSummary)] = []
-        for id in ids {
-            guard let run = loadRun(id: id), let log = try? logs.load(runID: id) else { continue }
-            inputs.append((run, log, summary(id: id) ?? RunSummary(run: run)))
-        }
-        let work = inputs
+        guard let runsDirectory = store?.directory, let logsDirectory = logs?.directory else { return [] }
+        let wanted = Set(ids)
+        let before = Dictionary(uniqueKeysWithValues: summaries.filter { wanted.contains($0.id) }.map { ($0.id, $0) })
+        // Logs are tens of megabytes; read and decode them off the main thread.
         return await Task.detached(priority: .userInitiated) {
-            work.map { run, log, before in
+            guard let store = try? RunStore(directory: runsDirectory),
+                  let logs = try? SensorLogStore(directory: logsDirectory) else { return [] }
+            return ids.compactMap { id in
+                guard let run = try? store.loadRun(id: id), let log = try? logs.load(runID: id) else { return nil }
                 let after = Reprocessor.reprocess(run, log: log)
-                return ReprocessItem(id: run.id, before: before, after: after, afterSummary: RunSummary(run: after))
+                return ReprocessItem(id: id, before: before[id] ?? RunSummary(run: run), after: after, afterSummary: RunSummary(run: after))
             }
         }.value
     }

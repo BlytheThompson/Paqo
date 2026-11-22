@@ -155,4 +155,16 @@ final class SessionTests: XCTestCase {
             try Data(text.utf8).write(to: folder.appendingPathComponent(name))
         }
     }
+
+    func testMetaReadsOnlyTheMetaFile() throws {
+        let store = try SensorLogStore(directory: tempDirectory())
+        let m = meta()
+        try store.makeWriter(meta: m).close()
+        // A huge or damaged CSV must not matter when only the start date is needed.
+        let folder = store.directory.appendingPathComponent(m.runID.uuidString)
+        try FileManager.default.removeItem(at: folder.appendingPathComponent("accel.csv"))
+        try FileManager.default.createDirectory(at: folder.appendingPathComponent("accel.csv"), withIntermediateDirectories: true)
+        XCTAssertEqual(store.meta(runID: m.runID), m)
+        XCTAssertNil(store.meta(runID: UUID()))
+    }
 }

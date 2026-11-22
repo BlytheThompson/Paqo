@@ -152,4 +152,59 @@ final class BackupTests: XCTestCase {
         XCTAssertEqual(batch.runs.count, 0)
         XCTAssertTrue(batch.problems.first?.contains("Unzip it in the Files app") ?? false)
     }
+
+    func testMissingCSVIsRebuiltFromFolderJSON() throws {
+        let writer = BackupWriter(root: root)
+        for day in 0..<3 { try writer.save(run(day), unit: .miles, timeZone: utc) }
+        try FileManager.default.removeItem(at: backup.appendingPathComponent("runs.csv"))
+        try FileManager.default.removeItem(at: backup.appendingPathComponent("sprints.csv"))
+        try writer.save(run(3), unit: .miles, timeZone: utc)
+        XCTAssertEqual(try csvRows("runs.csv").count, 5)
+        XCTAssertEqual(try csvRows("sprints.csv").count, 1 + 4 * 3)
+    }
+
+    func testEvictedFilesKeepRunPending() throws {
+        let writer = BackupWriter(root: root)
+        try writer.save(run(0), unit: .miles, timeZone: utc)
+        try writer.save(run(1), unit: .miles, timeZone: utc)
+        // iCloud evicted the CSV: only a placeholder is left on the phone.
+        let csv = backup.appendingPathComponent("runs.csv")
+        let placeholder = backup.appendingPathComponent(".runs.csv.icloud")
+        try FileManager.default.moveItem(at: csv, to: placeholder)
+        XCTAssertThrowsError(try writer.save(run(2), unit: .miles, timeZone: utc)) { error in
+            XCTAssertEqual(error as? BackupError, .notDownloaded("runs.csv"))
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: csv.path), "must not replace the evicted file with a shorter one")
+
+        // A rebuild that would need an evicted run file also waits.
+        try FileManager.default.moveItem(at: placeholder, to: csv)
+        let runsFolder = backup.appendingPathComponent("runs")
+        let json = try FileManager.default.contentsOfDirectory(atPath: runsFolder.path).first { $0.hasSuffix(".json") }!
+        try FileManager.default.moveItem(at: runsFolder.appendingPathComponent(json), to: runsFolder.appendingPathComponent("." + json + ".icloud"))
+        try Data("garbage".utf8).write(to: csv)
+        XCTAssertThrowsError(try writer.save(run(3), unit: .miles, timeZone: utc)) { error in
+            XCTAssertEqual(error as? BackupError, .notDownloaded(json))
+        }
+    }
+
+    func testEvictedItemsNameTheFilesToDownload() throws {
+        let writer = BackupWriter(root: root)
+        try writer.save(run(0), unit: .miles, timeZone: utc)
+        let runsFolder = backup.appendingPathComponent("runs")
+        let json = try FileManager.default.contentsOfDirectory(atPath: runsFolder.path).first { $0.hasSuffix(".json") }!
+        try FileManager.default.moveItem(at: backup.appendingPathComponent("runs.csv"), to: backup.appendingPathComponent(".runs.csv.icloud"))
+        try FileManager.default.moveItem(at: runsFolder.appendingPathComponent(json), to: runsFolder.appendingPathComponent("." + json + ".icloud"))
+
+        let items = writer.evictedItems()
+        XCTAssertEqual(items.map(\.lastPathComponent).sorted(), [json, "runs.csv"].sorted())
+        XCTAssertEqual(items.first { $0.lastPathComponent == json }?.deletingLastPathComponent().lastPathComponent, "runs")
+    }
+
+    func testPickingTheBackupFolderItselfUpdatesIt() throws {
+        try BackupWriter(root: root).save(run(0), unit: .miles, timeZone: utc)
+        // After a reinstall the owner picks the "Paqo Backup" folder itself.
+        try BackupWriter(root: backup).save(run(1), unit: .miles, timeZone: utc)
+        XCTAssertEqual(try csvRows("runs.csv").count, 3)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: backup.appendingPathComponent("Paqo Backup").path))
+    }
 }
