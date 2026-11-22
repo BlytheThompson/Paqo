@@ -15,6 +15,10 @@ public struct LocationSample: Codable, Hashable, Sendable {
     public var speed: Double
     /// Negative means unavailable.
     public var speedAccuracy: Double
+    /// Direction of travel in degrees from true north. Negative means invalid.
+    public var course: Double
+    /// Degrees. Negative means invalid.
+    public var courseAccuracy: Double
 
     public init(
         timestamp: Date,
@@ -24,7 +28,9 @@ public struct LocationSample: Codable, Hashable, Sendable {
         horizontalAccuracy: Double = 5,
         verticalAccuracy: Double = -1,
         speed: Double = -1,
-        speedAccuracy: Double = -1
+        speedAccuracy: Double = -1,
+        course: Double = -1,
+        courseAccuracy: Double = -1
     ) {
         self.timestamp = timestamp
         self.latitude = latitude
@@ -34,9 +40,31 @@ public struct LocationSample: Codable, Hashable, Sendable {
         self.verticalAccuracy = verticalAccuracy
         self.speed = speed
         self.speedAccuracy = speedAccuracy
+        self.course = course
+        self.courseAccuracy = courseAccuracy
     }
 
     public var coordinate: Coordinate { Coordinate(latitude: latitude, longitude: longitude) }
+
+    enum CodingKeys: String, CodingKey {
+        case timestamp, latitude, longitude, altitude, horizontalAccuracy, verticalAccuracy
+        case speed, speedAccuracy, course, courseAccuracy
+    }
+
+    // Course fields arrived in v1.1; older autosaves don't have them.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        timestamp = try c.decode(Date.self, forKey: .timestamp)
+        latitude = try c.decode(Double.self, forKey: .latitude)
+        longitude = try c.decode(Double.self, forKey: .longitude)
+        altitude = try c.decodeIfPresent(Double.self, forKey: .altitude)
+        horizontalAccuracy = try c.decode(Double.self, forKey: .horizontalAccuracy)
+        verticalAccuracy = try c.decode(Double.self, forKey: .verticalAccuracy)
+        speed = try c.decode(Double.self, forKey: .speed)
+        speedAccuracy = try c.decode(Double.self, forKey: .speedAccuracy)
+        course = try c.decodeIfPresent(Double.self, forKey: .course) ?? -1
+        courseAccuracy = try c.decodeIfPresent(Double.self, forKey: .courseAccuracy) ?? -1
+    }
 }
 
 public enum MotionActivityKind: String, Codable, Sendable {
@@ -91,4 +119,21 @@ public struct AltitudeSample: Codable, Hashable, Sendable {
         self.timestamp = timestamp
         self.relativeAltitude = relativeAltitude
     }
+}
+
+/// One accelerometer reading (CMAccelerometerData), in g, including gravity.
+public struct AccelSample: Codable, Hashable, Sendable {
+    public var timestamp: Date
+    public var x: Double
+    public var y: Double
+    public var z: Double
+
+    public init(timestamp: Date, x: Double, y: Double, z: Double) {
+        self.timestamp = timestamp
+        self.x = x
+        self.y = y
+        self.z = z
+    }
+
+    public var magnitude: Double { (x * x + y * y + z * z).squareRoot() }
 }
