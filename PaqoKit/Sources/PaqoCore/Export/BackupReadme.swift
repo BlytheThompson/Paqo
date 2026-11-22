@@ -1,0 +1,65 @@
+import Foundation
+
+/// The README.txt written into every backup.
+public enum BackupReadme {
+    public static func text(unit: DistanceUnit) -> String {
+        let u = unit == .miles ? "mi" : "km"
+        let s = unit == .miles ? "mph" : "kmh"
+        let lines = [
+            "PAQO BACKUP",
+            "===========",
+            "",
+            "Your runs from Paqo, in open formats anyone can read.",
+            "",
+            "FILES",
+            "  runs.csv      One row per run. Opens in Excel, Numbers or Google Sheets.",
+            "  sprints.csv   One row per sprint, across all runs.",
+            "  runs/*.json   One file per run with everything Paqo knows, including the",
+            "                full route. Paqo can import these back (Settings > Backup).",
+            "  runs/*.gpx    The route of each run in GPX 1.1, which Strava, Garmin",
+            "                Connect and Google Earth can import.",
+            "  deleted/      Files of runs you deleted in Paqo. Paqo never erases them.",
+            "",
+            "File names are the run's local start time plus the start of its id,",
+            "e.g. 2026-11-22-0712-1a2b3c4d.json.",
+            "",
+            "UNITS",
+            "  Columns ending in _m are meters, _s seconds, _mps meters per second,",
+            "  _spm steps per minute, _pct percent. Columns ending in _\(u) or _\(s) are",
+            "  the same values in your unit, formatted for reading. Paces are min:sec",
+            "  per \(u). Times without a suffix are h:mm:ss.",
+            "",
+            "RUNS.CSV",
+            "  run_id               Paqo's id for the run (matches the JSON file).",
+            "  start_local          Start time in your time zone.",
+            "  start_utc            Start time in UTC, ISO 8601.",
+            "  distance_m           Distance. moving_time_s excludes pauses;",
+            "                       elapsed_time_s includes them.",
+            "  steps / avg_cadence  From the motion sensors.",
+            "  sprint_count         Sprints Paqo detected.",
+            "  sprint_time_s        Total time sprinting; sprint_distance_m likewise.",
+            "  sprint_share_pct     Share of moving time spent sprinting.",
+            "  avg_sprint_speed     Total sprint distance divided by total sprint time.",
+            "  peak_speed           Highest speed held for 2 seconds.",
+            "  avg_rest_s           Average walk between your first and last sprint.",
+            "  work_rest_ratio      Time sprinting divided by time resting between sprints.",
+            "  run_fade_pct         How much slower your last third of sprints were than",
+            "                       your first third (negative means slower).",
+            "  engine_version       Which version of Paqo's detection measured the run.",
+            "",
+            "SPRINTS.CSV",
+            "  sprint_number        1 for the run's first sprint, and so on.",
+            "  start_s              When the sprint started, in moving time.",
+            "  time_to_peak_s       Seconds from the start of the sprint to its peak speed.",
+            "  climb_m              Meters climbed during the sprint.",
+            "  rest_after_s         The walk that followed it.",
+            "  in_sprint_fade_pct   Speed in the sprint's last third versus its first.",
+            "",
+            "JSON FILES",
+            "  \"format\": \"paqo-run\", \"version\": 1. Dates are ISO 8601. Each track",
+            "  point has time, lat, lon, alt_m, speed_mps, active_s (moving time),",
+            "  distance_m and new_line (true after a pause).",
+        ]
+        return lines.joined(separator: "\r\n") + "\r\n"
+    }
+}
