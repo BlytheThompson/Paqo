@@ -41,6 +41,12 @@ struct RecordsView: View {
                         entry: records.topSpeed
                     )
                     RecordRow(
+                        title: "Fastest sprint (avg)",
+                        value: records.fastestSprint.map { "\(Format.speed($0.value, unit: unit)) \(unit.speedAbbreviation)" },
+                        detail: records.fastestSprint == nil ? nil : "Sprints of 10 s or more",
+                        entry: records.fastestSprint
+                    )
+                    RecordRow(
                         title: "Longest sprint",
                         value: records.longestSprintDistance.map { "\(Format.distance($0.value, unit: unit)) \(unit.abbreviation)" },
                         entry: records.longestSprintDistance

@@ -13,50 +13,77 @@ struct HistoryView: View {
         let runs: [RunSummary]
     }
 
+    enum Mode: Hashable {
+        case list, map
+    }
+
+    @State private var mode: Mode = .list
+
     var body: some View {
         NavigationStack {
-            List {
-                Section {
-                    TotalsCard(period: $period, unit: unit)
-                        .listRowInsets(EdgeInsets())
-                        .listRowBackground(Color.clear)
-                }
-                ForEach(monthGroups) { group in
-                    Section {
-                        ForEach(group.runs) { summary in
-                            NavigationLink(value: summary.id) {
-                                RunRow(summary: summary, unit: unit)
-                            }
-                            .listRowBackground(Theme.surface)
-                            .swipeActions {
-                                Button(role: .destructive) {
-                                    library.delete(id: summary.id)
-                                } label: {
-                                    Label("Delete", systemImage: "trash")
-                                }
-                            }
-                        }
-                    } header: {
-                        Text(group.title)
-                            .font(Theme.label)
-                            .foregroundStyle(Theme.textSecondary)
-                    }
+            Group {
+                if mode == .map {
+                    HeatmapView()
+                } else {
+                    runList
                 }
             }
-            .scrollContentBackground(.hidden)
             .background(Theme.background.ignoresSafeArea())
             .navigationTitle("History")
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Picker("View", selection: $mode) {
+                        Image(systemName: "list.bullet").tag(Mode.list)
+                        Image(systemName: "map").tag(Mode.map)
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(width: 110)
+                    .accessibilityLabel("List or map")
+                }
+            }
             .navigationDestination(for: UUID.self) { id in
                 RunDetailLoader(id: id)
             }
-            .overlay {
-                if library.summaries.isEmpty {
-                    ContentUnavailableView(
-                        "No runs yet",
-                        systemImage: "figure.run",
-                        description: Text("Tap Start on the Run tab. Your runs will show up here.")
-                    )
+        }
+    }
+
+    private var runList: some View {
+        List {
+            Section {
+                TotalsCard(period: $period, unit: unit)
+                    .listRowInsets(EdgeInsets())
+                    .listRowBackground(Color.clear)
+            }
+            ForEach(monthGroups) { group in
+                Section {
+                    ForEach(group.runs) { summary in
+                        NavigationLink(value: summary.id) {
+                            RunRow(summary: summary, unit: unit)
+                        }
+                        .listRowBackground(Theme.surface)
+                        .swipeActions {
+                            Button(role: .destructive) {
+                                library.delete(id: summary.id)
+                            } label: {
+                                Label("Delete", systemImage: "trash")
+                            }
+                        }
+                    }
+                } header: {
+                    Text(group.title)
+                        .font(Theme.label)
+                        .foregroundStyle(Theme.textSecondary)
                 }
+            }
+        }
+        .scrollContentBackground(.hidden)
+        .overlay {
+            if library.summaries.isEmpty {
+                ContentUnavailableView(
+                    "No runs yet",
+                    systemImage: "figure.run",
+                    description: Text("Tap Start on the Run tab. Your runs will show up here.")
+                )
             }
         }
     }
