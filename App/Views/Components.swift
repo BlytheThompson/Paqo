@@ -1,4 +1,5 @@
 import PaqoCore
+import UIKit
 import SwiftUI
 
 /// A number with a small label underneath ("24:31" / "TIME").
@@ -126,4 +127,21 @@ struct GPSIndicator: View {
 
 extension RoutePiece {
     var color: Color { kind == .sprint ? Theme.accent : Theme.walk }
+}
+
+/// A file to hand to the share sheet.
+struct SharedFile: Identifiable {
+    let url: URL
+    var id: URL { url }
+}
+
+/// The system share sheet (Save to Files, AirDrop, Mail…).
+struct ShareSheet: UIViewControllerRepresentable {
+    let items: [Any]
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: items, applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
 }
