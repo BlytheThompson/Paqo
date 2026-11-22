@@ -76,6 +76,32 @@ public final class RunStore {
         updateHeatmapCache { routes in routes.removeAll { $0.id == id } }
     }
 
+    /// Adds runs that aren't here yet (matched by id). Returns how many were added
+    /// and how many were already present.
+    @discardableResult
+    public func importRuns(_ runs: [Run]) throws -> (imported: Int, skipped: Int) {
+        var summaries = (try? loadSummaries()) ?? []
+        var known = Set(summaries.map { $0.id })
+        var added: [Run] = []
+        var skipped = 0
+        for run in runs {
+            guard known.insert(run.id).inserted else {
+                skipped += 1
+                continue
+            }
+            try write(run, to: runURL(run.id))
+            summaries.append(RunSummary(run: run))
+            added.append(run)
+        }
+        if !added.isEmpty {
+            try writeIndex(summaries)
+            updateHeatmapCache { routes in
+                for run in added { routes.append(HeatmapBuilder.route(for: run)) }
+            }
+        }
+        return (added.count, skipped)
+    }
+
     // MARK: - Heatmap
 
     /// Every run's simplified route, oldest first. Fills in runs missing from the
