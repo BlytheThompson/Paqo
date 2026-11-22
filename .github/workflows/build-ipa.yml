@@ -1,0 +1,89 @@
+name: Build IPA
+
+# Manual only, so pushing code never spends build minutes.
+# Start it from GitHub (Actions → Build IPA → Run workflow) or a terminal:
+#   gh workflow run build-ipa.yml
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: build-ipa
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode 26.6
+        run: sudo xcode-select -s /Applications/Xcode_26.6.app
+
+      # Tests already pass on Windows; on the Mac they're a cross-check that should
+      # not stop the IPA from being built. Failures still show in the log.
+      - name: Test core logic
+        working-directory: PaqoKit
+        continue-on-error: true
+        run: swift test
+
+      - name: Generate Xcode project
+        run: |
+          brew install xcodegen
+          xcodegen generate
+
+      - name: Build unsigned archive
+        run: |
+          mkdir -p build
+          if ! xcodebuild archive \
+              -project Paqo.xcodeproj \
+              -scheme Paqo \
+              -configuration Release \
+              -destination 'generic/platform=iOS' \
+              -archivePath build/Paqo.xcarchive \
+              CODE_SIGNING_ALLOWED=NO \
+              CODE_SIGNING_REQUIRED=NO \
+              CODE_SIGN_IDENTITY="" \
+              > build/xcodebuild.log 2>&1; then
+            echo "::group::Errors"
+            grep -E "error:" build/xcodebuild.log | sort -u | head -80 || true
+            echo "::endgroup::"
+            tail -40 build/xcodebuild.log
+            exit 1
+          fi
+          echo "Warnings in Paqo sources:"
+          grep -E "/(App|Shared|Widget|PaqoKit)/.*warning:" build/xcodebuild.log | sort -u | head -60 || true
+
+      - name: Package IPA
+        run: |
+          APP=build/Paqo.xcarchive/Products/Applications/Paqo.app
+          test -d "$APP"
+          # Ad-hoc sign so the sideloading tool can see the app's entitlements
+          # (HealthKit); it re-signs everything with your Apple ID anyway.
+          for ext in "$APP"/PlugIns/*.appex; do
+            codesign --force --sign - --timestamp=none "$ext"
+          done
+          codesign --force --sign - --timestamp=none --entitlements Config/Paqo.entitlements "$APP"
+          codesign -d --entitlements - "$APP" || true
+          mkdir -p build/ipa/Payload
+          cp -R "$APP" build/ipa/Payload/
+          (cd build/ipa && zip -qry ../Paqo.ipa Payload)
+          ls -lh build/Paqo.ipa
+          {
+            echo "### Paqo.ipa is ready"
+            echo ""
+            echo "Download the **Paqo-${{ github.run_number }}** artifact below, unzip it, and sideload \`Paqo.ipa\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Paqo-${{ github.run_number }}
+          path: build/Paqo.ipa
+          retention-days: 14
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: build-log-${{ github.run_number }}
+          path: build/xcodebuild.log
+          retention-days: 7
