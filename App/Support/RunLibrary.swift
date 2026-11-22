@@ -10,9 +10,15 @@ final class RunLibrary {
     private(set) var records = PersonalRecords()
 
     let store: RunStore?
+    /// Raw sensor logs, one folder per run (kept for the most recent runs).
+    let logs: SensorLogStore?
+
+    /// How many sensor logs to keep.
+    static let sensorLogLimit = 20
 
     init() {
         store = try? RunStore(directory: RunStore.defaultDirectory())
+        logs = try? SensorLogStore(directory: RunStore.defaultDirectory().appendingPathComponent("sensor-logs", isDirectory: true))
         reload()
     }
 
@@ -34,6 +40,7 @@ final class RunLibrary {
 
     func delete(id: UUID) {
         try? store?.delete(id: id)
+        logs?.delete(runID: id)
         reload()
     }
 

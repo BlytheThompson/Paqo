@@ -110,7 +110,9 @@ public extension LocationSample {
             horizontalAccuracy: location.horizontalAccuracy,
             verticalAccuracy: location.verticalAccuracy,
             speed: location.speed,
-            speedAccuracy: location.speedAccuracy
+            speedAccuracy: location.speedAccuracy,
+            course: location.course,
+            courseAccuracy: location.courseAccuracy
         )
     }
 }

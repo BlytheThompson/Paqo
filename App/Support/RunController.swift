@@ -40,8 +40,11 @@ final class RunController {
     @ObservationIgnored private let location = LocationService()
     @ObservationIgnored private let motion = MotionService()
     @ObservationIgnored private let health = HealthService()
+    @ObservationIgnored private let accelerometer = AccelerometerService()
     @ObservationIgnored private let liveActivity = LiveActivityController()
-    @ObservationIgnored private var engine: RunEngine?
+    /// Normalises every sensor event, writes it to the sensor log and feeds the engine.
+    @ObservationIgnored private var recorder: SessionRecorder?
+    @ObservationIgnored private var logWriter: SensorLogWriter?
     @ObservationIgnored private var tickTask: Task<Void, Never>?
     @ObservationIgnored private var lastAutosave = Date.distantPast
     @ObservationIgnored private var lastTrackCount = 0
@@ -52,13 +55,16 @@ final class RunController {
             self?.handle(sample)
         }
         motion.onActivity = { [weak self] sample in
-            self?.engine?.ingest(sample)
+            self?.recorder?.record(.activity(sample))
         }
         motion.onPedometer = { [weak self] sample in
-            self?.engine?.ingest(sample)
+            self?.recorder?.record(.pedometer(sample))
         }
         motion.onAltitude = { [weak self] sample in
-            self?.engine?.ingest(sample)
+            self?.recorder?.record(.altitude(sample))
+        }
+        accelerometer.onBatch = { [weak self] batch in
+            self?.recorder?.record(.accelerometer(batch))
         }
         RunIntentBridge.shared.toggleHandler = { [weak self] in
             self?.togglePause()
@@ -66,6 +72,9 @@ final class RunController {
         liveActivity.endStaleActivities()
         recoverUnfinishedRun()
     }
+
+    /// The engine of the run being recorded.
+    private var engine: RunEngine? { recorder?.engine }
 
     var isRecording: Bool { phase == .recording }
     var isPaused: Bool { snapshot?.state == .paused }
@@ -129,12 +138,15 @@ final class RunController {
 
     private func beginRecording() {
         let now = Date()
-        var engine = RunEngine()
-        engine.start(at: now)
-        self.engine = engine
+        let engine = RunEngine()
+        logWriter = makeLogWriter(for: engine, start: now)
+        let recorder = SessionRecorder(engine: engine, sink: logWriter)
+        recorder.record(.control(.start(now)))
+        self.recorder = recorder
         lastTrackCount = 0
         routePieces = []
         motion.start(from: now)
+        accelerometer.start()
         phase = .recording
         notify(.success)
         refresh()
@@ -146,14 +158,13 @@ final class RunController {
     // MARK: - During the run
 
     func togglePause() {
-        guard phase == .recording, var engine else { return }
+        guard phase == .recording, let recorder else { return }
         let now = Date()
-        switch engine.state {
-        case .running: engine.pause(at: now)
-        case .paused: engine.resume(at: now)
+        switch recorder.engine.state {
+        case .running: recorder.record(.control(.pause(now)))
+        case .paused: recorder.record(.control(.resume(now)))
         case .idle, .finished: return
         }
-        self.engine = engine
         haptic(.medium)
         refresh()
         liveActivity.update(state: activityState(), force: true)
@@ -162,9 +173,9 @@ final class RunController {
 
     private func handle(_ sample: LocationSample) {
         gpsAccuracy = sample.horizontalAccuracy >= 0 ? sample.horizontalAccuracy : nil
-        guard engine != nil else { return }
-        engine?.ingest(sample)
-        let count = engine?.track.count ?? 0
+        guard let recorder else { return }
+        recorder.record(.location(sample))
+        let count = recorder.engine.track.count
         if count != lastTrackCount {
             lastTrackCount = count
             rebuildRoute()
@@ -201,13 +212,16 @@ final class RunController {
     // MARK: - Finish
 
     func finish() {
-        guard phase == .recording, var engine else { return }
-        let run = engine.finish(at: Date())
+        guard phase == .recording, let recorder else { return }
+        let run = recorder.finish(at: Date())
         stopSensors()
-        self.engine = nil
+        self.recorder = nil
+        logWriter?.close()
+        logWriter = nil
         liveActivity.end(state: activityState(for: run))
         library.save(run)
         library.store?.clearInProgress()
+        library.logs?.prune(keep: RunLibrary.sensorLogLimit, protecting: nil)
         routePieces = RouteBuilder.pieces(track: run.track, segments: run.segments)
         finishedRun = run
         phase = .finished
@@ -218,7 +232,10 @@ final class RunController {
     func discard() {
         guard phase == .recording else { return }
         stopSensors()
-        engine = nil
+        logWriter?.close()
+        logWriter = nil
+        if let id = recorder?.engine.id { library.logs?.delete(runID: id) }
+        recorder = nil
         liveActivity.end(state: nil)
         library.store?.clearInProgress()
         routePieces = []
@@ -240,6 +257,35 @@ final class RunController {
         tickTask = nil
         location.stopRecording()
         motion.stop()
+        accelerometer.stop()
+    }
+
+    // MARK: - Sensor log
+
+    private func makeLogWriter(for engine: RunEngine, start: Date) -> SensorLogWriter? {
+        guard UserDefaults.standard.recordSensorLogs, let logs = library.logs else { return nil }
+        let meta = SensorLogMeta(
+            runID: engine.id,
+            appVersion: Self.appVersion,
+            engineVersion: RunEngine.version,
+            deviceModel: Self.deviceModel,
+            startDate: start,
+            config: engine.config
+        )
+        return try? logs.makeWriter(meta: meta)
+    }
+
+    static var appVersion: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown"
+    }
+
+    /// e.g. "iPhone18,2".
+    static var deviceModel: String {
+        var info = utsname()
+        uname(&info)
+        return withUnsafeBytes(of: &info.machine) { buffer in
+            String(decoding: buffer.prefix { $0 != 0 }, as: UTF8.self)
+        }
     }
 
     // MARK: - Apple Health
@@ -290,6 +336,7 @@ final class RunController {
         guard engine.state == .running || engine.state == .paused, engine.track.count > 1 else { return }
         let run = engine.finish(at: engine.lastActivityDate ?? Date())
         library.save(run)
+        library.logs?.prune(keep: RunLibrary.sensorLogLimit, protecting: nil)
         recoveredRun = run
     }
 
