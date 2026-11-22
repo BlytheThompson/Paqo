@@ -19,10 +19,18 @@ public struct SegmentClassifier: Codable, Sendable {
         public var sprintCadence: Double = 145
         /// Steps per minute at or below which cadence votes "walk".
         public var walkCadence: Double = 125
+        /// Accelerometer impact intensity (g RMS) at or above which it votes "sprint".
+        public var sprintIntensity: Double = 0.7
+        /// Intensity at or below which it votes "walk".
+        public var walkIntensity: Double = 0.35
+        /// A rhythm sample (timestamped at its window's centre) counts this long.
+        public var rhythmFreshness: TimeInterval = 3
+        /// Rhythm cadence below this periodicity is ignored.
+        public var minRhythmPeriodicity: Double = 0.3
         /// Seconds the sprint evidence must hold before switching walk → sprint.
-        public var toSprintDelay: TimeInterval = 3
+        public var toSprintDelay: TimeInterval = 1.5
         /// Seconds the walk evidence must hold before switching sprint → walk.
-        public var toWalkDelay: TimeInterval = 4
+        public var toWalkDelay: TimeInterval = 2
         /// Cadence older than this is ignored.
         public var cadenceFreshness: TimeInterval = 6
         /// |score| below this is "can't tell" and doesn't push either way.
@@ -44,6 +52,7 @@ public struct SegmentClassifier: Codable, Sendable {
     var lastMotion: MotionActivitySample?
     var lastCadence: Double?
     var lastCadenceDate: Date?
+    var lastRhythm: RhythmSample?
 
     public init(config: Configuration = Configuration()) {
         self.config = config
@@ -58,10 +67,15 @@ public struct SegmentClassifier: Codable, Sendable {
         lastCadenceDate = date
     }
 
-    /// Positive means sprint, negative means walk. Roughly in [-3.5, 3.5].
-    public func score(speed: Double?, at date: Date) -> Double {
-        var score = 0.0
+    public mutating func update(rhythm: RhythmSample) {
+        lastRhythm = rhythm
+    }
 
+    /// The evidence that counts right now: the activity vote (signed weight), a
+    /// cadence (accelerometer rhythm when fresh, else the pedometer) and the impact
+    /// intensity (accelerometer only).
+    public func components(at date: Date) -> (motion: Double, cadence: Double?, intensity: Double?) {
+        var motionVote = 0.0
         if let motion = lastMotion {
             let weight: Double
             switch motion.confidence {
@@ -70,21 +84,36 @@ public struct SegmentClassifier: Codable, Sendable {
             case .high: weight = 1.5
             }
             switch motion.kind {
-            case .running: score += weight
-            case .walking, .stationary: score -= weight
+            case .running: motionVote = weight
+            case .walking, .stationary: motionVote = -weight
             case .cycling, .automotive, .unknown: break
             }
         }
 
-        if let cadence = lastCadence, let when = lastCadenceDate,
-           date.timeIntervalSince(when) <= config.cadenceFreshness {
-            score += vote(cadence, low: config.walkCadence, high: config.sprintCadence)
+        if let rhythm = lastRhythm, abs(date.timeIntervalSince(rhythm.timestamp)) <= config.rhythmFreshness {
+            let cadence = rhythm.periodicity >= config.minRhythmPeriodicity ? rhythm.cadence : nil
+            return (motionVote, cadence, rhythm.intensity)
         }
 
-        if let speed, speed >= 0 {
-            score += vote(speed, low: config.walkSpeed, high: config.sprintSpeed)
+        var cadence: Double?
+        if let c = lastCadence, let when = lastCadenceDate, date.timeIntervalSince(when) <= config.cadenceFreshness {
+            cadence = c
         }
+        return (motionVote, cadence, nil)
+    }
 
+    /// Positive means sprint, negative means walk. Roughly in [-4.5, 4.5].
+    public func score(speed: Double?, at date: Date) -> Double {
+        let parts = components(at: date)
+        return Self.score(motion: parts.motion, cadence: parts.cadence, intensity: parts.intensity, speed: speed, config: config)
+    }
+
+    /// The evidence score from its parts; shared with whole-run re-segmentation.
+    public static func score(motion: Double?, cadence: Double?, intensity: Double?, speed: Double?, config: Configuration) -> Double {
+        var score = motion ?? 0
+        if let cadence { score += vote(cadence, low: config.walkCadence, high: config.sprintCadence) }
+        if let intensity { score += vote(intensity, low: config.walkIntensity, high: config.sprintIntensity) }
+        if let speed, speed >= 0 { score += vote(speed, low: config.walkSpeed, high: config.sprintSpeed) }
         return score
     }
 
@@ -132,7 +161,7 @@ public struct SegmentClassifier: Codable, Sendable {
     }
 
     /// Maps a value to a vote in [-1, 1]: -1 at or below `low`, +1 at or above `high`.
-    func vote(_ value: Double, low: Double, high: Double) -> Double {
+    static func vote(_ value: Double, low: Double, high: Double) -> Double {
         if value >= high { return 1 }
         if value <= low { return -1 }
         let mid = (low + high) / 2

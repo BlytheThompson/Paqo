@@ -9,7 +9,7 @@ final class SegmentTests: XCTestCase {
             _ = classifier.classify(speed: 1.4, at: t0.addingTimeInterval(Double(s)), activeTime: Double(s))
         }
         XCTAssertEqual(classifier.current, .walk)
-        // Sprint evidence starts at t=10; switch confirmed 3 s later, back-dated to 10.
+        // Sprint evidence starts at t=10; switch confirmed 1.5 s later, back-dated to 10.
         var transition: SegmentClassifier.Transition?
         for s in 10..<20 where transition == nil {
             transition = classifier.classify(speed: 5, at: t0.addingTimeInterval(Double(s)), activeTime: Double(s))
