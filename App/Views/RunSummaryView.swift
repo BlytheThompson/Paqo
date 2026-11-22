@@ -13,32 +13,51 @@ struct RunSummaryView: View {
     @State private var run: Run
     private let justFinished: Bool
     private let onDone: (() -> Void)?
-    private let pieces: [RoutePiece]
-    private let profile: [ProfilePoint]
+    @State private var pieces: [RoutePiece]
+    @State private var profile: [ProfilePoint]
 
     @State private var renaming = false
     @State private var newName = ""
     @State private var confirmDelete = false
+    @State private var showingReplay = false
+    @State private var reprocessing = false
+    @State private var sharedFile: SharedFile?
 
     init(run: Run, justFinished: Bool = false, onDone: (() -> Void)? = nil) {
         _run = State(initialValue: run)
         self.justFinished = justFinished
         self.onDone = onDone
-        pieces = RouteBuilder.pieces(track: run.track, segments: run.segments)
-        profile = ProfileBuilder.profile(for: run)
+        _pieces = State(initialValue: RouteBuilder.pieces(track: run.track, segments: run.segments))
+        _profile = State(initialValue: ProfileBuilder.profile(for: run))
     }
 
     var body: some View {
+        let details = SprintAnalyzer.details(for: run)
+        let sprintStats = SprintAnalyzer.stats(for: run, details: details)
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 RouteMapView(pieces: pieces, start: run.track.first?.coordinate, end: run.track.last?.coordinate)
                     .frame(height: 300)
                     .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+                    .overlay(alignment: .bottomTrailing) {
+                        if run.track.count > 1 {
+                            Button {
+                                showingReplay = true
+                            } label: {
+                                Label("Replay", systemImage: "play.fill")
+                                    .font(.subheadline.weight(.semibold))
+                                    .padding(.horizontal, 14)
+                                    .padding(.vertical, 8)
+                                    .background(.ultraThinMaterial, in: Capsule())
+                            }
+                            .padding(12)
+                        }
+                    }
 
                 titleBlock
                 headline
                 healthBanner
-                if !run.sprints.isEmpty { sprintHighlights }
+                if !details.isEmpty { SprintStatsGrid(stats: sprintStats, unit: unit) }
                 SplitsSection(run: run, unit: unit)
                 if profile.contains(where: { $0.pace != nil }) {
                     PaceChart(profile: profile, segments: run.segments, track: run.track, unit: unit)
@@ -46,7 +65,8 @@ struct RunSummaryView: View {
                 if profile.contains(where: { $0.altitude != nil }) {
                     ElevationChart(profile: profile, gain: run.elevationGain, loss: run.elevationLoss, unit: unit)
                 }
-                if !run.sprints.isEmpty { SprintList(run: run, unit: unit) }
+                if details.count > 1 { SprintFadeChart(details: details, unit: unit, fade: sprintStats.fade) }
+                if !details.isEmpty { SprintTable(details: details, unit: unit) }
             }
             .padding(16)
         }
@@ -66,6 +86,19 @@ struct RunSummaryView: View {
                         newName = run.name
                         renaming = true
                     } label: { Label("Rename", systemImage: "pencil") }
+                    if run.track.count > 1 {
+                        Button {
+                            showingReplay = true
+                        } label: { Label("Replay", systemImage: "play.circle") }
+                    }
+                    if library.hasSensorLog(run.id) {
+                        Button {
+                            if let url = library.sensorLogArchive(for: run.id) { sharedFile = SharedFile(url: url) }
+                        } label: { Label("Share sensor log", systemImage: "square.and.arrow.up") }
+                        Button {
+                            reprocessing = true
+                        } label: { Label("Re-process", systemImage: "arrow.triangle.2.circlepath") }
+                    }
                     if !run.savedToHealth {
                         Button {
                             Task {
@@ -81,11 +114,22 @@ struct RunSummaryView: View {
                 }
             }
         }
+        .fullScreenCover(isPresented: $showingReplay) {
+            ReplayView(run: run, unit: unit)
+        }
+        .sheet(item: $sharedFile) { file in
+            ShareSheet(items: [file.url])
+        }
+        .sheet(isPresented: $reprocessing) {
+            ReprocessSheet(ids: [run.id]) { runs in
+                if let updated = runs.first { show(updated) }
+            }
+        }
         .alert("Rename Run", isPresented: $renaming) {
             TextField("Name", text: $newName)
             Button("Save") {
                 library.rename(id: run.id, to: newName)
-                if let updated = library.loadRun(id: run.id) { run = updated }
+                if let updated = library.loadRun(id: run.id) { show(updated) }
             }
             Button("Cancel", role: .cancel) {}
         }
@@ -160,21 +204,11 @@ struct RunSummaryView: View {
         .padding(.horizontal, 4)
     }
 
-    private var sprintHighlights: some View {
-        let sprints = run.sprints
-        let longest = sprints.max { $0.distance < $1.distance }
-        return Card {
-            Grid(alignment: .leading, horizontalSpacing: 20, verticalSpacing: 14) {
-                GridRow {
-                    StatBlock(value: "\(sprints.count)", label: sprints.count == 1 ? "Sprint" : "Sprints", size: 28)
-                    StatBlock(value: Format.speed(run.topSpeed, unit: unit), unit: unit.speedAbbreviation, label: "Top speed", size: 28)
-                }
-                GridRow {
-                    StatBlock(value: Format.distance(longest?.distance ?? 0, unit: unit), unit: unit.abbreviation, label: "Longest sprint", size: 20)
-                    StatBlock(value: Format.duration(sprints.map(\.duration).max() ?? 0), label: "Longest sprint time", size: 20)
-                }
-            }
-        }
+    /// Shows a changed version of this run (renamed or re-processed).
+    private func show(_ updated: Run) {
+        run = updated
+        pieces = RouteBuilder.pieces(track: updated.track, segments: updated.segments)
+        profile = ProfileBuilder.profile(for: updated)
     }
 }
 
@@ -423,68 +457,5 @@ struct ElevationChart: View {
                 .frame(height: 140)
             }
         }
-    }
-}
-
-// MARK: - Sprint list
-
-struct SprintList: View {
-    let run: Run
-    let unit: DistanceUnit
-
-    private struct Row: Identifiable {
-        let id: Int
-        let number: Int
-        let sprint: RunSegment
-        let walkAfter: RunSegment?
-    }
-
-    var body: some View {
-        let rows = makeRows()
-        VStack(alignment: .leading, spacing: 10) {
-            SectionHeader(title: "Sprints")
-            Card {
-                VStack(spacing: 0) {
-                    ForEach(rows) { row in
-                        VStack(alignment: .leading, spacing: 6) {
-                            HStack(alignment: .firstTextBaseline) {
-                                Text("\(row.number)")
-                                    .font(.system(size: 15, weight: .bold).monospacedDigit())
-                                    .foregroundStyle(Theme.accent)
-                                    .frame(width: 26, alignment: .leading)
-                                Text("\(Format.distance(row.sprint.distance, unit: unit)) \(unit.abbreviation)")
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                Text(Format.duration(row.sprint.duration))
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                Text("\(Format.speed(row.sprint.topSpeed, unit: unit)) \(unit.speedAbbreviation)")
-                                    .frame(maxWidth: .infinity, alignment: .trailing)
-                            }
-                            .font(.system(size: 16, weight: .semibold).monospacedDigit())
-                            if let walk = row.walkAfter {
-                                Text("then walked \(Format.duration(walk.duration)) · \(Format.distance(walk.distance, unit: unit)) \(unit.abbreviation)")
-                                    .font(.caption)
-                                    .foregroundStyle(Theme.textSecondary)
-                                    .padding(.leading, 26)
-                            }
-                        }
-                        .padding(.vertical, 10)
-                        if row.id != rows.last?.id {
-                            Divider().overlay(Theme.hairline)
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    private func makeRows() -> [Row] {
-        var rows: [Row] = []
-        var number = 0
-        for (index, segment) in run.segments.enumerated() where segment.kind == .sprint {
-            number += 1
-            let next = index + 1 < run.segments.count ? run.segments[index + 1] : nil
-            rows.append(Row(id: index, number: number, sprint: segment, walkAfter: next?.kind == .walk ? next : nil))
-        }
-        return rows
     }
 }
