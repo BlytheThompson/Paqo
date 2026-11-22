@@ -96,6 +96,8 @@ public struct PersonalRecords: Sendable, Equatable {
     /// Seconds.
     public var longestSprintDuration: RecordEntry?
     public var mostSprints: RecordEntry?
+    /// m/s: fastest average speed of a sprint lasting at least 10 s.
+    public var fastestSprint: RecordEntry?
     /// Consecutive weeks with at least one run, counting this week or last week.
     public var currentWeekStreak: Int = 0
     public var longestWeekStreak: Int = 0
@@ -139,6 +141,7 @@ public struct PersonalRecords: Sendable, Equatable {
         records.longestSprintDistance = best { $0.longestSprintDistance }
         records.longestSprintDuration = best { $0.longestSprintDuration }
         records.mostSprints = best { Double($0.sprintCount) }
+        records.fastestSprint = best { $0.sprintStats.fastestTenSecondSprintSpeed }
 
         // Weekly and monthly aggregates.
         var weekTotals: [Date: Double] = [:]

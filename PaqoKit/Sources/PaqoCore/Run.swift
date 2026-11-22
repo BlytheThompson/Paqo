@@ -273,6 +273,9 @@ public struct RunSummary: Codable, Identifiable, Hashable, Sendable {
     public var longestSprintDuration: TimeInterval
     public var bestEfforts: [BestEffort]
     public var savedToHealth: Bool
+    /// Non-optional on purpose: a v1 index without it fails to decode and is rebuilt
+    /// from the run files.
+    public var sprintStats: SprintStats
 
     public init(run: Run) {
         id = run.id
@@ -284,7 +287,16 @@ public struct RunSummary: Codable, Identifiable, Hashable, Sendable {
         elevationGain = run.elevationGain
         let sprints = run.sprints
         sprintCount = sprints.count
-        topSpeed = run.topSpeed
+        let stats = SprintAnalyzer.stats(for: run)
+        sprintStats = stats
+        // Peak speed by the 2-second rule for every run, old or new.
+        if !sprints.isEmpty {
+            topSpeed = stats.peakSpeed
+        } else if run.track.count > 1 {
+            topSpeed = TrackMath.peakSpeed(in: run.track, from: 0, to: run.movingTime).speed
+        } else {
+            topSpeed = run.topSpeed
+        }
         longestSprintDistance = sprints.map(\.distance).max() ?? 0
         longestSprintDuration = sprints.map(\.duration).max() ?? 0
         bestEfforts = BestEffortCalculator.bestEfforts(
