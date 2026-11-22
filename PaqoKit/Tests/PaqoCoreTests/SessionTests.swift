@@ -117,4 +117,42 @@ final class SessionTests: XCTestCase {
         let names = try ZipReader.entries(of: Data(contentsOf: zip)).map { ($0.path as NSString).lastPathComponent }
         XCTAssertEqual(Set(names), Set(["meta.json"] + SensorLogCodec.fileNames))
     }
+
+    // MARK: - Replay tool
+
+    func testOverridesApply() throws {
+        var config = RunEngine.Configuration()
+        try ConfigOverrides.apply(["sprintCadence=150", "switchPenalty=3", "maxConsecutiveRejections=5"], to: &config)
+        XCTAssertEqual(config.classifier.sprintCadence, 150)
+        XCTAssertEqual(config.resegmenter.switchPenalty, 3)
+        XCTAssertEqual(config.filter.maxConsecutiveRejections, 5)
+    }
+
+    func testUnknownOverrideThrows() {
+        var config = RunEngine.Configuration()
+        XCTAssertThrowsError(try ConfigOverrides.apply(["sprintness=9"], to: &config))
+        XCTAssertThrowsError(try ConfigOverrides.apply(["sprintCadence=fast"], to: &config))
+    }
+
+    func testReportListsEverySegment() {
+        let run = recordLive(intervalTrace(), meta: meta()).run
+        let lines = ReplayReport.text(for: run).split(separator: "\n", omittingEmptySubsequences: false)
+        XCTAssertTrue(lines[0].contains("\(run.sprints.count) sprints"))
+        XCTAssertEqual(lines.filter { $0.hasPrefix("  ") }.count, run.segments.count)
+        XCTAssertNoThrow(try ReplayReport.json(for: run))
+    }
+
+    /// Writes a generated log for trying `swift run paqo-replay ../private/sample-log`.
+    /// Only runs when PAQO_WRITE_SAMPLE is set.
+    func testWriteSampleLogForCLI() throws {
+        guard ProcessInfo.processInfo.environment["PAQO_WRITE_SAMPLE"] != nil else { return }
+        let files = recordLive(intervalTrace(), meta: meta()).files
+        let repo = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let folder = repo.appendingPathComponent("private/sample-log", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        for (name, text) in files {
+            try Data(text.utf8).write(to: folder.appendingPathComponent(name))
+        }
+    }
 }

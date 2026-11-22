@@ -13,6 +13,9 @@ build/
 Config/*.plist
 Config/*.entitlements
 
+# Real sensor logs and backups contain GPS routes (including home). Never commit.
+private/
+
 # OS
 .DS_Store
 Thumbs.db

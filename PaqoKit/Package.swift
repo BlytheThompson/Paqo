@@ -20,6 +20,8 @@ let package = Package(
     targets: [
         .target(name: "PaqoCore"),
         .target(name: "PaqoSensors", dependencies: ["PaqoCore"]),
+        // Replays a sensor log on any computer: swift run paqo-replay <log>
+        .executableTarget(name: "paqo-replay", dependencies: ["PaqoCore"]),
         .testTarget(name: "PaqoCoreTests", dependencies: ["PaqoCore"]),
     ]
 )
