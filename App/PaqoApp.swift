@@ -25,7 +25,7 @@ struct PaqoApp: App {
 
 struct RootView: View {
     enum AppTab: Hashable {
-        case run, history, records, settings
+        case run, history, trends, records, settings
     }
 
     @Environment(RunController.self) private var controller
@@ -39,6 +39,9 @@ struct RootView: View {
             HistoryView()
                 .tabItem { Label("History", systemImage: "list.bullet") }
                 .tag(AppTab.history)
+            TrendsView()
+                .tabItem { Label("Trends", systemImage: "chart.line.uptrend.xyaxis") }
+                .tag(AppTab.trends)
             RecordsView()
                 .tabItem { Label("Records", systemImage: "trophy") }
                 .tag(AppTab.records)
