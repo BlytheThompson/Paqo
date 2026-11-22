@@ -4,7 +4,8 @@ A light, simple run tracker for iPhone. Everything other run apps put behind a p
 free here: no accounts, no ads, and your runs stay on your phone.
 
 Built for running in bursts. Paqo splits each run into **sprints and walks** automatically,
-using the motion coprocessor (running vs walking), step cadence and GPS speed.
+using the accelerometer (step rhythm and impact), the motion coprocessor (running vs
+walking), the pedometer and GPS speed.
 
 ## What v1 does
 
@@ -23,6 +24,27 @@ using the motion coprocessor (running vs walking), step cadence and GPS speed.
   off in Settings.
 - **Settings:** a miles/km switch.
 
+## What v1.1 adds
+
+- **Sharper sprint detection:** the accelerometer (50 Hz) gives step cadence and impact
+  intensity every half second. When you finish, Paqo re-labels the whole run second by
+  second, looking both ways in time, so sprint start and end times land within about a
+  second.
+- **Smoother route:** a Kalman filter blends GPS position, GPS speed and your steps, and
+  holds still when your feet do. On finish the route is smoothed again with the whole run
+  in view. GPS wobble no longer adds distance.
+- **Sprint stats and trends:** for every sprint: average and peak speed, pace, time to peak,
+  cadence, climb, the rest after it and how much it faded. For every run: time sprinting,
+  sprint-to-rest ratio and fade across sprints. A **Trends** tab charts all of it by week or
+  month. Records gains "fastest sprint".
+- **Heatmap and replay:** History has a map of every route (or just your sprints). Any run
+  can be replayed on its map at 10×, 30× or 60×.
+- **Backups in open formats:** pick a folder (iCloud Drive, OneDrive…) and every run is
+  written there as it's saved: `runs.csv`, `sprints.csv`, plus a JSON and GPX file per run.
+  You can also export everything as one zip, and import runs back.
+- **Sensor recorder:** each run's raw sensor data is kept (last 20 runs) so detection can be
+  tuned to your real runs. Runs can be **re-processed** with newer settings.
+
 Later: voice updates, auto-pause, heart rate, treadmill mode, goal runs, pace alerts and
 intervals.
 
@@ -30,11 +52,13 @@ intervals.
 
 ```
 PaqoKit/                 Swift package
-  Sources/PaqoCore/      Pure Swift (Foundation only): tracking engine, GPS filtering,
-                         sprint/walk detection, splits, best efforts, records, storage.
-                         Builds and tests on Windows, Linux and macOS.
+  Sources/PaqoCore/      Pure Swift (Foundation only): tracking engine, Kalman route
+                         filter, step rhythm, sprint/walk detection, sprint stats, trends,
+                         records, heatmap, replay, sensor logs, CSV/JSON/GPX export,
+                         backups. Builds and tests on Windows, Linux and macOS.
+  Sources/paqo-replay/   Command-line tool: replays a sensor log on any computer.
   Sources/PaqoSensors/   iOS only: CoreLocation, CoreMotion (activity, pedometer,
-                         barometer) and HealthKit wrappers that feed PaqoCore.
+                         barometer, accelerometer) and HealthKit wrappers.
   Tests/PaqoCoreTests/   Unit tests, including simulated sprint/walk runs.
 App/                     SwiftUI app (screens, run controller, Live Activity control)
 Widget/                  Live Activity (lock screen + Dynamic Island)
@@ -95,8 +119,40 @@ On first launch, iOS asks for these permissions:
 - **Motion & Fitness:** sprint detection, cadence and the barometer.
 - **Apple Health:** only if saving to Health is on.
 
+## Sensor logs and tuning
+
+With **Settings › Sensor logs** on (the default), Paqo saves each run's raw sensor data:
+`meta.json` plus `gps.csv`, `activity.csv`, `pedometer.csv`, `altimeter.csv`, `accel.csv` and
+`events.csv`, about 6–9 MB per hour. Logs for the last 20 runs are kept. To tune detection:
+
+1. In a run's ⋯ menu, tap **Share sensor log** and save the zip somewhere the PC can reach
+   (OneDrive, iCloud Drive for Windows, email).
+2. Put it in `private/` in this repo. **Never commit real logs or backups**: they contain
+   your routes, including where you live. `private/` is gitignored.
+3. Replay it through the engine, optionally with different settings:
+
+```bash
+cd PaqoKit
+swift run paqo-replay ../private/paqo-sensor-log-1a2b3c4d.zip
+swift run paqo-replay ../private/paqo-sensor-log-1a2b3c4d.zip --set sprintCadence=150 --set switchPenalty=4
+```
+
+After a build with new settings, **Re-process** (per run, or all at once in Settings)
+re-runs saved logs so older runs pick up the improvements. Apple Health keeps the original
+numbers.
+
+## Backups
+
+**Settings › Backup › Auto-backup folder**: every run you save, rename or delete is written
+to `Paqo Backup/` in that folder. Paqo only ever touches the run that changed, and never
+erases anything (deleted runs move to `deleted/`), so reinstalling Paqo can't wipe a backup.
+**Export all runs** makes one zip; **Import runs** reads a backup folder, zip or JSON files
+back in. See `README.txt` inside any backup for every column.
+
 ## Tuning
 
-Sprint and walk thresholds live in `SegmentClassifier.Configuration`. By default, a sprint
-is ≥ 2.5 m/s or ≥ 145 steps/min, and a walk is ≤ 1.9 m/s or ≤ 125 steps/min. GPS filtering
-lives in `RunEngine.Configuration`. Both are plain values with tests around them.
+Sprint and walk thresholds live in `SegmentClassifier.Configuration` (speed, cadence and
+accelerometer intensity), whole-run re-segmentation in `Resegmenter.Configuration`, and the
+route filter in `RouteFilter.Configuration`; all of them hang off `RunEngine.Configuration`.
+`swift run paqo-replay --help` lists every setting. When results change, bump
+`RunEngine.version` so the app offers to re-process older runs.
