@@ -220,7 +220,7 @@ public enum SegmentSmoother {
     static func recomputeTopSpeeds(_ segments: [RunSegment], track: [TrackPoint]) -> [RunSegment] {
         segments.map { segment in
             var s = segment
-            s.topSpeed = TrackMath.topSpeed(in: track, from: segment.startTime, to: segment.endTime)
+            s.topSpeed = TrackMath.peakSpeed(in: track, from: segment.startTime, to: segment.endTime).speed
             return s
         }
     }

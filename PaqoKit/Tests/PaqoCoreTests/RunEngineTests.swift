@@ -40,7 +40,9 @@ final class RunEngineTests: XCTestCase {
             // Boundaries are back-dated, so each sprint is close to its true 45 s / 247 m.
             XCTAssertEqual(sprint.duration, 45, accuracy: 3)
             XCTAssertEqual(sprint.distance, 247.5, accuracy: 15)
-            XCTAssertEqual(sprint.topSpeed, 5.5, accuracy: 0.01)
+            // The trace jumps from 1.4 to 5.5 m/s instantly (no runner does); the smoother
+            // overshoots that by under 1 %.
+            XCTAssertEqual(sprint.topSpeed, 5.5, accuracy: 0.08)
         }
         // Segments tile the run with no gaps.
         for (a, b) in zip(run.segments, run.segments.dropFirst()) {
@@ -118,7 +120,8 @@ final class RunEngineTests: XCTestCase {
         let run = engine.finish(at: after.time)
         XCTAssertEqual(run.movingTime, 120, accuracy: 0.001)
         XCTAssertEqual(run.elapsedTime, 240, accuracy: 0.001)
-        XCTAssertEqual(run.distance, 360, accuracy: 6)
+        // The first fix of each line (3 m in) anchors it and adds no distance: 2 × 3 m.
+        XCTAssertEqual(run.distance, 360, accuracy: 6.5)
         XCTAssertEqual(run.pauses.count, 1)
         XCTAssertTrue(run.track.contains { $0.startsNewLine }, "the line should break at the pause")
         XCTAssertEqual(RouteBuilder.pieces(track: run.track, segments: run.segments).count, 2)
@@ -215,7 +218,98 @@ final class RunEngineTests: XCTestCase {
         let run = restored.finish(at: more.time)
         XCTAssertEqual(run.sprints.count, 2)
         let expected: Double = 150 + 42 + 150
-        XCTAssertEqual(run.distance, expected, accuracy: 5)
+        // The first fix (1 s in, 5 m along) anchors the route and adds no distance.
+        XCTAssertEqual(run.distance, expected, accuracy: 6)
+    }
+
+    /// Walk 60 s, sprint 30 s, walk 60 s, sprint 30 s, walk 60 s.
+    func intervalTrace(accuracy: Double = 5) -> TraceBuilder {
+        var trace = TraceBuilder()
+        for (seconds, speed) in [(60, 1.4), (30, 4.0), (60, 1.4), (30, 4.0), (60, 1.4)] {
+            trace.move(seconds: seconds, speed: speed, accuracy: accuracy)
+        }
+        return trace
+    }
+
+    func run(from trace: TraceBuilder) -> Run {
+        var engine = RunEngine()
+        for event in trace.events() { engine.apply(event) }
+        return engine.finish(at: trace.time)
+    }
+
+    func testSprintBoundariesWithinOneAndAHalfSeconds() {
+        let run = run(from: intervalTrace())
+        XCTAssertEqual(run.sprints.count, 2)
+        guard run.sprints.count == 2 else { return }
+        XCTAssertEqual(run.sprints[0].startTime, 60, accuracy: 1.5)
+        XCTAssertEqual(run.sprints[0].endTime, 90, accuracy: 1.5)
+        XCTAssertEqual(run.sprints[1].startTime, 150, accuracy: 1.5)
+        XCTAssertEqual(run.sprints[1].endTime, 180, accuracy: 1.5)
+    }
+
+    func testDistanceWithinOnePercentOfTruth() {
+        let run = run(from: intervalTrace(accuracy: 8))
+        let truth = 60 * 1.4 * 3 + 30 * 4.0 * 2
+        XCTAssertEqual(run.distance, truth, accuracy: truth * 0.01)
+    }
+
+    func testRunWithNoFixesFinishesCleanly() {
+        var trace = TraceBuilder()
+        trace.move(seconds: 60, speed: 1.4)
+        trace.move(seconds: 60, speed: 4)
+        var engine = RunEngine()
+        for event in trace.events() {
+            if case .location = event { continue }
+            engine.apply(event)
+        }
+        let run = engine.finish(at: trace.time)
+        XCTAssertEqual(run.distance, 0)
+        XCTAssertTrue(run.track.isEmpty)
+        XCTAssertEqual(run.movingTime, 120, accuracy: 0.001)
+        XCTAssertEqual(run.segments.last?.endTime ?? 0, 120, accuracy: 0.001)
+    }
+
+    func testThreeHourRunFinishesQuickly() {
+        var trace = TraceBuilder()
+        trace.includeAccel = false
+        trace.move(seconds: 10_800, speed: 2.5)
+        var engine = RunEngine()
+        engine.start(at: t0)
+        trace.feed(&engine)
+        let started = Date()
+        let run = engine.finish(at: trace.time)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 2)
+        XCTAssertEqual(run.distance, 27_000, accuracy: 270)
+    }
+
+    func testPeakSpeedIsTwoSecondAverage() {
+        let track = straightTrack(segments: [(10, 4), (1, 9), (10, 4)])
+        let peak = TrackMath.peakSpeed(in: track, from: 0, to: 21)
+        XCTAssertLessThan(peak.speed, 6.6)
+        XCTAssertGreaterThan(peak.speed, 6.4)
+    }
+
+    func testRunCarriesEngineVersionAndCadence() {
+        let run = run(from: intervalTrace())
+        XCTAssertEqual(run.engineVersion, 2)
+        for sprint in run.sprints {
+            XCTAssertEqual(sprint.averageCadence ?? 0, 170, accuracy: 5)
+        }
+    }
+
+    func testLowWeightFixAndBigJumpBarelyMoveTheRoute() {
+        var engine = RunEngine()
+        engine.start(at: t0)
+        var trace = TraceBuilder()
+        trace.move(seconds: 60, speed: 3)
+        // A 30 m-accuracy fix 20 m off to the side, and a 300 m jump.
+        trace.fixes[30].horizontalAccuracy = 30
+        trace.fixes[30].longitude += 20 / Geo.metersPerDegreeLongitude(at: trace.latitude)
+        trace.fixes[45].latitude += 300 / Geo.metersPerDegreeLatitude(at: trace.latitude)
+        trace.fixes[45].speed = -1
+        trace.feed(&engine)
+        let run = engine.finish(at: trace.time)
+        XCTAssertEqual(run.distance, 180, accuracy: 5)
     }
 
     func testRecoveredRunClosesAtLastActivity() {

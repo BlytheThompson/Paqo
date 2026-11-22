@@ -61,6 +61,95 @@ public enum TrackMath {
         return max(1, low)
     }
 
+    /// Peak speed between two active times: the highest average speed held over
+    /// `window` seconds, measured along the track. `time` is the middle of that window.
+    /// A span shorter than the window returns its overall average.
+    public static func peakSpeed(
+        in track: [TrackPoint],
+        from start: TimeInterval,
+        to end: TimeInterval,
+        window: TimeInterval = 2
+    ) -> (speed: Double, time: TimeInterval) {
+        guard !track.isEmpty, end > start else { return (0, start) }
+        if end - start <= window {
+            let d = distance(atActiveTime: end, in: track) - distance(atActiveTime: start, in: track)
+            return (max(0, d / (end - start)), (start + end) / 2)
+        }
+        func average(endingAt t: TimeInterval) -> Double {
+            max(0, (distance(atActiveTime: t, in: track) - distance(atActiveTime: t - window, in: track)) / window)
+        }
+        var bestTime = start + window
+        var best = average(endingAt: bestTime)
+        let endSpeed = average(endingAt: end)
+        if endSpeed > best { best = endSpeed; bestTime = end }
+        var i = firstIndex(atOrAfter: start + window, in: track)
+        while i < track.count && track[i].activeTime <= end {
+            let s = average(endingAt: track[i].activeTime)
+            if s > best { best = s; bestTime = track[i].activeTime }
+            i += 1
+        }
+        return (best, bestTime - window / 2)
+    }
+
+    /// Metres climbed between two active times, ignoring wiggles under `deadband`.
+    public static func climb(in track: [TrackPoint], from start: TimeInterval, to end: TimeInterval, deadband: Double = 1) -> Double {
+        var gain = 0.0
+        var reference: Double?
+        var i = firstIndex(atOrAfter: start, in: track)
+        while i < track.count && track[i].activeTime <= end {
+            if let altitude = track[i].altitude {
+                if let ref = reference {
+                    if altitude - ref >= deadband {
+                        gain += altitude - ref
+                        reference = altitude
+                    } else if altitude - ref <= -deadband {
+                        reference = altitude
+                    }
+                } else {
+                    reference = altitude
+                }
+            }
+            i += 1
+        }
+        return gain
+    }
+
+    /// Position at an active time, interpolated between track points.
+    public static func coordinate(atActiveTime time: TimeInterval, in track: [TrackPoint]) -> Coordinate? {
+        guard let first = track.first, let last = track.last else { return nil }
+        if time <= first.activeTime { return first.coordinate }
+        if time >= last.activeTime { return last.coordinate }
+        let j = firstIndex(atOrAfter: time, in: track)
+        let a = track[j - 1], b = track[j]
+        let span = b.activeTime - a.activeTime
+        guard span > 0 else { return b.coordinate }
+        let f = (time - a.activeTime) / span
+        return Coordinate(
+            latitude: a.latitude + (b.latitude - a.latitude) * f,
+            longitude: a.longitude + (b.longitude - a.longitude) * f
+        )
+    }
+
+    /// Speed around an active time: distance covered from t−1 s to t+1 s. Distance
+    /// based, so a stop with no track points reads as (nearly) zero.
+    public static func speed(atActiveTime time: TimeInterval, in track: [TrackPoint]) -> Double {
+        guard let first = track.first, let last = track.last, last.activeTime > first.activeTime else { return 0 }
+        let a = max(first.activeTime, time - 1)
+        let b = min(last.activeTime, time + 1)
+        guard b > a else { return 0 }
+        return max(0, (distance(atActiveTime: b, in: track) - distance(atActiveTime: a, in: track)) / (b - a))
+    }
+
+    /// Index of the first point with activeTime >= time (track.count if none).
+    static func firstIndex(atOrAfter time: TimeInterval, in track: [TrackPoint]) -> Int {
+        var low = 0, high = track.count
+        while low < high {
+            let mid = (low + high) / 2
+            if track[mid].activeTime < time { low = mid + 1 } else { high = mid }
+        }
+        return low
+    }
+
     /// Spike-filtered top speed between two active times: the maximum of a 3-point
     /// rolling median, so a single bad GPS fix cannot set a record.
     public static func topSpeed(in track: [TrackPoint], from start: TimeInterval, to end: TimeInterval) -> Double {

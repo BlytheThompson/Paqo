@@ -37,7 +37,11 @@ public struct FilterMeasurement: Codable, Hashable, Sendable {
     public var positionSigma: Double
     public var velocityEast: Double?
     public var velocityNorth: Double?
+    /// Uncertainty along the direction of travel (speed accuracy), m/s.
     public var velocitySigma: Double?
+    /// Uncertainty across the direction of travel (speed × course accuracy), m/s.
+    /// nil means the same as `velocitySigma`.
+    public var velocityCrossSigma: Double?
     /// Feet say the runner is standing: pin velocity to zero.
     public var zeroVelocity: Bool
     /// Speed from cadence × stride, used when GPS is poor.
@@ -55,6 +59,7 @@ public struct FilterMeasurement: Codable, Hashable, Sendable {
         velocityEast: Double?,
         velocityNorth: Double?,
         velocitySigma: Double?,
+        velocityCrossSigma: Double? = nil,
         zeroVelocity: Bool,
         stepSpeed: Double?,
         stepSpeedSigma: Double?,
@@ -69,6 +74,7 @@ public struct FilterMeasurement: Codable, Hashable, Sendable {
         self.velocityEast = velocityEast
         self.velocityNorth = velocityNorth
         self.velocitySigma = velocitySigma
+        self.velocityCrossSigma = velocityCrossSigma
         self.zeroVelocity = zeroVelocity
         self.stepSpeed = stepSpeed
         self.stepSpeedSigma = stepSpeedSigma
@@ -206,7 +212,17 @@ public struct RouteFilter: Codable, Sendable {
             let v = config.zeroVelocitySigma * config.zeroVelocitySigma
             apply(z: [0, 0], indices: (2, 3), variance: v)
         } else if let ve = m.velocityEast, let vn = m.velocityNorth, let sv = m.velocitySigma {
-            apply(z: [ve, vn], indices: (2, 3), variance: sv * sv)
+            let cross = m.velocityCrossSigma ?? sv
+            let speed = (ve * ve + vn * vn).squareRoot()
+            if speed > 0.1, cross != sv {
+                // Speed is known well along the path, course only blurs it sideways.
+                let ue = ve / speed, un = vn / speed
+                let a = sv * sv, b = cross * cross
+                let r = [a * ue * ue + b * un * un, (a - b) * ue * un, (a - b) * ue * un, a * un * un + b * ue * ue]
+                apply(z: [ve, vn], indices: (2, 3), covariance: r)
+            } else {
+                apply(z: [ve, vn], indices: (2, 3), variance: sv * sv)
+            }
         } else if let speed = m.stepSpeed, let sigma = m.stepSpeedSigma {
             let current = (x[2] * x[2] + x[3] * x[3]).squareRoot()
             if current > 0.3 {
@@ -217,11 +233,16 @@ public struct RouteFilter: Codable, Sendable {
         return Step(xPred: xPred, pPred: pPred, xFilt: x, pFilt: p, f: f, accepted: accepted, startsLine: false)
     }
 
-    /// Standard Kalman update for a 2-D measurement of two state components with
-    /// equal, independent noise.
+    /// Kalman update for a 2-D measurement of two state components with equal,
+    /// independent noise.
     mutating func apply(z: [Double], indices: (Int, Int), variance: Double) {
+        apply(z: z, indices: indices, covariance: [variance, 0, 0, variance])
+    }
+
+    /// Kalman update for a 2-D measurement with a full 2×2 noise covariance.
+    mutating func apply(z: [Double], indices: (Int, Int), covariance r: [Double]) {
         let (i, j) = indices
-        let s = [p[i * 4 + i] + variance, p[i * 4 + j], p[j * 4 + i], p[j * 4 + j] + variance]
+        let s = [p[i * 4 + i] + r[0], p[i * 4 + j] + r[1], p[j * 4 + i] + r[2], p[j * 4 + j] + r[3]]
         guard let sInv = Mat.inverse2(s) else { return }
         let y = [z[0] - x[i], z[1] - x[j]]
         // K = P Hᵀ S⁻¹ (4×2); Hᵀ picks columns i and j of P.

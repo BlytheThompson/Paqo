@@ -30,19 +30,32 @@ public struct LiveSnapshot: Equatable, Sendable {
     public var gpsAccuracy: Double?
 }
 
-/// The run recorder. Pure logic: sensors push samples in, the UI reads snapshots out.
+/// The run recorder. Pure logic: sensor events go in, live snapshots and a finished
+/// `Run` come out. It never reads the clock, so replaying a sensor log reproduces a
+/// run exactly.
+///
+/// While recording, GPS goes through a Kalman filter (position, Doppler velocity,
+/// "standing still" and step-based speed), and a live classifier labels sprints and
+/// walks. On finish the route is smoothed with the whole run in view and the run is
+/// re-segmented second by second.
 ///
 /// The whole engine is `Codable` so an in-progress run can be autosaved and recovered
 /// if the app is killed mid-run.
 public struct RunEngine: Codable, Sendable {
+    /// Bumped whenever detection or filtering changes in a way that changes results.
+    public static let version = 2
+
     public struct Configuration: Codable, Sendable, Equatable {
         /// Fixes less accurate than this (meters) are ignored.
-        public var maxHorizontalAccuracy: Double = 25
-        /// Fixes implying a faster speed than this (m/s) are glitches. Usain Bolt peaks ~12.4.
-        public var maxSpeed: Double = 12.5
-        /// Movement smaller than this between accepted fixes is treated as jitter (meters).
-        /// Distance is measured from the last accepted fix, so nothing is lost.
-        public var minStep: Double = 1.0
+        public var maxHorizontalAccuracy: Double = 50
+        /// Fixes less accurate than this count with half the weight.
+        public var downweightAccuracy: Double = 25
+        /// GPS this poor (meters) brings in step-based speed.
+        public var poorGPSAccuracy: Double = 15
+        /// Stride is learned only from fixes at least this good (meters).
+        public var strideLearningAccuracy: Double = 10
+        /// Track points closer than this (meters) to the previous one are skipped.
+        public var minStep: Double = 0.5
         /// Window for current pace and speed (seconds).
         public var paceWindow: TimeInterval = 15
         /// Below this speed (m/s), with no steps or a stationary activity, the runner is standing.
@@ -51,7 +64,11 @@ public struct RunEngine: Codable, Sendable {
         public var stepStaleness: TimeInterval = 4
         /// Doppler speed is trusted when its accuracy is at most this (m/s).
         public var maxSpeedAccuracy: Double = 1.5
+        /// Uncertainty of cadence × stride speed (m/s).
+        public var stepSpeedSigma: Double = 0.5
         public var classifier = SegmentClassifier.Configuration()
+        public var filter = RouteFilter.Configuration()
+        public var resegmenter = Resegmenter.Configuration()
 
         public init() {}
     }
@@ -70,9 +87,20 @@ public struct RunEngine: Codable, Sendable {
     /// The latest raw fix, accepted or not (for the GPS signal indicator).
     public private(set) var latestFix: LocationSample?
 
-    var lastAccepted: LocationSample?
+    var lastProcessedFix: LocationSample?
     var needsNewLine = false
+    var line = 0
+    var frame: LocalFrame?
+    var filter: RouteFilter
+    var filterInputs: [FilterMeasurement] = []
+    var lastPointEast: Double?
+    var lastPointNorth: Double?
+    var lastSpeed: Double = 0
     var classifier: SegmentClassifier
+    var rhythmAnalyzer = StepRhythmAnalyzer()
+    var latestRhythm: RhythmSample?
+    var stride: Double?
+    var evidence: [EvidenceSample] = []
     var latestSteps: Int?
     var lastStepIncrease: Date?
     var stepsAtPause: Int?
@@ -85,6 +113,28 @@ public struct RunEngine: Codable, Sendable {
         self.id = id
         self.config = config
         self.classifier = SegmentClassifier(config: config.classifier)
+        self.filter = RouteFilter(config: config.filter)
+    }
+
+    // MARK: - Events
+
+    /// Feeds one event. `.control(.finish)` is recorded by the session; call
+    /// `finish(at:)` to get the run.
+    public mutating func apply(_ event: SensorEvent) {
+        switch event {
+        case .location(let fix): ingest(fix)
+        case .activity(let sample): ingest(sample)
+        case .pedometer(let sample): ingest(sample)
+        case .altitude(let sample): ingest(sample)
+        case .accelerometer(let batch): ingest(batch)
+        case .control(let control):
+            switch control {
+            case .start(let date): start(at: date)
+            case .pause(let date): pause(at: date)
+            case .resume(let date): resume(at: date)
+            case .finish: break
+            }
+        }
     }
 
     // MARK: - Control
@@ -111,8 +161,10 @@ public struct RunEngine: Codable, Sendable {
         stepsAtPause = nil
         state = .running
         // Movement while paused is never counted: the next fix starts a fresh line.
-        lastAccepted = nil
+        line += 1
         needsNewLine = true
+        lastPointEast = nil
+        lastPointNorth = nil
         elevation.resetReference()
     }
 
@@ -124,12 +176,18 @@ public struct RunEngine: Codable, Sendable {
         let start = startDate ?? date
         let end = max(date, start)
         let moving = activeTime(at: end)
-        if !segments.isEmpty {
-            segments[segments.count - 1].endTime = max(moving, segments[segments.count - 1].startTime)
-            segments[segments.count - 1].endDistance = distance
-        }
         state = .finished
         endDate = end
+
+        rebuildSmoothedTrack()
+        var finalSegments = resegment(movingTime: moving)
+        finalSegments = SegmentSmoother.smooth(finalSegments, track: track)
+        finalSegments = finalSegments.map { segment in
+            var s = segment
+            s.averageCadence = averageCadence(from: segment.startTime, to: segment.endTime)
+            return s
+        }
+        segments = finalSegments
 
         return Run(
             id: id,
@@ -144,9 +202,10 @@ public struct RunEngine: Codable, Sendable {
             altitudeOffset: elevation.offset,
             steps: steps,
             track: track,
-            segments: SegmentSmoother.smooth(segments, track: track),
+            segments: finalSegments,
             pauses: pauses,
-            savedToHealth: false
+            savedToHealth: false,
+            engineVersion: Self.version
         )
     }
 
@@ -188,46 +247,73 @@ public struct RunEngine: Codable, Sendable {
         latestFix = fix
         guard state == .running, let start = startDate, fix.timestamp >= start else { return }
         guard fix.horizontalAccuracy >= 0, fix.horizontalAccuracy <= config.maxHorizontalAccuracy else { return }
-        if let last = lastAccepted, fix.timestamp <= last.timestamp { return }
+        if let last = lastProcessedFix, fix.timestamp <= last.timestamp { return }
+        lastProcessedFix = fix
 
         let t = activeTime(at: fix.timestamp)
-
-        guard let last = lastAccepted else {
-            // First fix of the run, or first after a resume: anchor without adding distance.
-            elevation.ingestGPS(altitude: fix.altitude, verticalAccuracy: fix.verticalAccuracy)
-            let speed = trustedSpeed(fix) ?? 0
-            appendPoint(fix, activeTime: t, speed: speed, newLine: needsNewLine)
-            needsNewLine = false
-            lastAccepted = fix
-            elevation.accumulate()
-            runClassifier(speed: speed, at: fix.timestamp, activeTime: t)
-            return
-        }
-
-        let step = Geo.distance(last.latitude, last.longitude, fix.latitude, fix.longitude)
-        let dt = fix.timestamp.timeIntervalSince(last.timestamp)
-        let impliedSpeed = dt > 0 ? step / dt : .infinity
-        guard impliedSpeed <= config.maxSpeed else { return } // Glitch: skip this fix.
+        if frame == nil { frame = LocalFrame(origin: fix.coordinate) }
+        guard let frame else { return }
+        let local = frame.toLocal(fix.coordinate)
 
         elevation.ingestGPS(altitude: fix.altitude, verticalAccuracy: fix.verticalAccuracy)
-        let speed = trustedSpeed(fix) ?? impliedSpeed
+        let trusted = trustedSpeed(fix)
+        let stationary = isStationary(at: fix.timestamp, speed: trusted ?? (filter.isRunning ? filter.state.speed : 0))
+        let rhythmCadence = freshRhythmCadence(at: fix.timestamp)
+        learnStride(fix: fix, speed: trusted, cadence: rhythmCadence)
 
-        // Standing still (traffic light): GPS wanders, but the feet don't.
-        if isStationary(at: fix.timestamp, speed: speed) && step < max(8, fix.horizontalAccuracy) {
-            runClassifier(speed: 0, at: fix.timestamp, activeTime: t)
-            return
+        var sigma = max(config.filter.minPositionSigma, fix.horizontalAccuracy)
+        if fix.horizontalAccuracy > config.downweightAccuracy { sigma *= 2 }
+
+        var velocity: (east: Double, north: Double, along: Double, cross: Double)?
+        if let speed = trusted, fix.course >= 0 {
+            let course = fix.course * .pi / 180
+            let courseSigma = (fix.courseAccuracy >= 0 ? fix.courseAccuracy : 10) * .pi / 180
+            let along = max(0.1, fix.speedAccuracy)
+            velocity = (speed * sin(course), speed * cos(course), along, max(along, speed * courseSigma))
         }
 
-        guard step >= config.minStep else {
-            runClassifier(speed: speed, at: fix.timestamp, activeTime: t)
-            return
+        var stepSpeed: Double?
+        if fix.horizontalAccuracy > config.poorGPSAccuracy, let cadence = rhythmCadence, let stride {
+            stepSpeed = cadence / 60 * stride
         }
 
-        distance += step
-        appendPoint(fix, activeTime: t, speed: speed, newLine: false)
-        lastAccepted = fix
+        let measurement = FilterMeasurement(
+            time: fix.timestamp,
+            activeTime: t,
+            line: line,
+            east: local.east,
+            north: local.north,
+            positionSigma: sigma,
+            velocityEast: velocity?.east,
+            velocityNorth: velocity?.north,
+            velocitySigma: velocity?.along,
+            velocityCrossSigma: velocity?.cross,
+            zeroVelocity: stationary,
+            stepSpeed: stepSpeed,
+            stepSpeedSigma: stepSpeed == nil ? nil : config.stepSpeedSigma,
+            altitude: elevation.currentAltitude
+        )
+        filterInputs.append(measurement)
+        let (filtered, accepted) = filter.update(measurement)
         elevation.accumulate()
+
+        let speed = stationary ? 0 : (trusted ?? filtered.speed)
+        lastSpeed = speed
+        if lastPointEast == nil || lastPointNorth == nil {
+            appendPoint(filtered, frame: frame, fix: fix, activeTime: t, speed: speed, newLine: needsNewLine)
+            needsNewLine = false
+        } else if accepted, !stationary, let e = lastPointEast, let n = lastPointNorth {
+            let step = hypot(filtered.east - e, filtered.north - n)
+            if step >= config.minStep {
+                distance += step
+                appendPoint(filtered, frame: frame, fix: fix, activeTime: t, speed: speed, newLine: false)
+            }
+        }
+
         runClassifier(speed: speed, at: fix.timestamp, activeTime: t)
+        let parts = classifier.components(at: fix.timestamp)
+        let rhythmIsFresh = latestRhythm.map { abs(fix.timestamp.timeIntervalSince($0.timestamp)) <= config.classifier.rhythmFreshness } ?? false
+        setEvidence(second: Int(t), motion: parts.motion, cadence: rhythmIsFresh ? nil : parts.cadence, intensity: nil)
     }
 
     public mutating func ingest(_ sample: MotionActivitySample) {
@@ -256,6 +342,30 @@ public struct RunEngine: Codable, Sendable {
         elevation.ingest(sample)
     }
 
+    /// Accelerometer readings (about 25 at a time). Produces the step rhythm that
+    /// feeds sprint detection.
+    public mutating func ingest(_ batch: [AccelSample]) {
+        guard state == .running || state == .paused, let start = startDate, let newest = batch.last else { return }
+        let rhythm = rhythmAnalyzer.ingest(batch)
+        guard state == .running else { return }
+        for sample in rhythm where sample.timestamp >= start {
+            latestRhythm = sample
+            classifier.update(rhythm: sample)
+            let cadence: Double?
+            if sample.periodicity >= config.classifier.minRhythmPeriodicity, let c = sample.cadence {
+                cadence = c
+            } else {
+                // No rhythm: standing (low intensity) counts as zero cadence; a phone
+                // being handled (high intensity, no rhythm) says nothing.
+                cadence = sample.intensity < 0.1 ? 0 : nil
+            }
+            setEvidence(second: Int(activeTime(at: sample.timestamp)), motion: nil, cadence: cadence, intensity: sample.intensity)
+        }
+        if !rhythm.isEmpty, newest.timestamp >= start {
+            runClassifier(speed: lastSpeed, at: newest.timestamp, activeTime: activeTime(at: newest.timestamp))
+        }
+    }
+
     // MARK: - Snapshot
 
     public func snapshot(at now: Date) -> LiveSnapshot {
@@ -276,6 +386,7 @@ public struct RunEngine: Codable, Sendable {
         let current = segments.last
         let sameKindCount = current.map { kind in segments.filter { $0.kind == kind.kind }.count } ?? 0
         let cadenceIsFresh = latestCadenceDate.map { now.timeIntervalSince($0) <= 10 } ?? false
+        let rhythmCadence = freshRhythmCadence(at: now)
 
         return LiveSnapshot(
             state: state,
@@ -291,7 +402,7 @@ public struct RunEngine: Codable, Sendable {
             sprintCount: segments.filter { $0.kind == .sprint }.count,
             elevationGain: elevation.gain,
             steps: steps,
-            cadence: cadenceIsFresh ? latestCadence : nil,
+            cadence: rhythmCadence ?? (cadenceIsFresh ? latestCadence : nil),
             gpsAccuracy: latestFix.map { $0.horizontalAccuracy }
         )
     }
@@ -301,6 +412,20 @@ public struct RunEngine: Codable, Sendable {
     func trustedSpeed(_ fix: LocationSample) -> Double? {
         guard fix.speed >= 0, fix.speedAccuracy >= 0, fix.speedAccuracy <= config.maxSpeedAccuracy else { return nil }
         return fix.speed
+    }
+
+    func freshRhythmCadence(at date: Date) -> Double? {
+        guard let rhythm = latestRhythm,
+              abs(date.timeIntervalSince(rhythm.timestamp)) <= config.classifier.rhythmFreshness,
+              rhythm.periodicity >= config.classifier.minRhythmPeriodicity else { return nil }
+        return rhythm.cadence
+    }
+
+    mutating func learnStride(fix: LocationSample, speed: Double?, cadence: Double?) {
+        guard fix.horizontalAccuracy <= config.strideLearningAccuracy,
+              let speed, speed > 0.5, let cadence, cadence > 30 else { return }
+        let sample = speed / (cadence / 60)
+        stride = stride.map { 0.9 * $0 + 0.1 * sample } ?? sample
     }
 
     func isStationary(at date: Date, speed: Double) -> Bool {
@@ -317,17 +442,37 @@ public struct RunEngine: Codable, Sendable {
         return motionSaysStill || noSteps
     }
 
-    mutating func appendPoint(_ fix: LocationSample, activeTime: TimeInterval, speed: Double, newLine: Bool) {
+    mutating func appendPoint(
+        _ state: FilterState,
+        frame: LocalFrame,
+        fix: LocationSample,
+        activeTime: TimeInterval,
+        speed: Double,
+        newLine: Bool
+    ) {
+        let coordinate = frame.toCoordinate(east: state.east, north: state.north)
         track.append(TrackPoint(
             timestamp: fix.timestamp,
-            latitude: fix.latitude,
-            longitude: fix.longitude,
+            latitude: coordinate.latitude,
+            longitude: coordinate.longitude,
             altitude: elevation.currentAltitude,
             speed: max(0, speed),
             activeTime: activeTime,
             distance: distance,
-            startsNewLine: newLine && track.count > 0
+            startsNewLine: newLine && !track.isEmpty
         ))
+        lastPointEast = state.east
+        lastPointNorth = state.north
+    }
+
+    mutating func setEvidence(second: Int, motion: Double?, cadence: Double?, intensity: Double?) {
+        guard second >= 0 else { return }
+        while evidence.count <= second {
+            evidence.append(EvidenceSample(second: evidence.count, motion: nil, cadence: nil, intensity: nil))
+        }
+        if let motion { evidence[second].motion = motion }
+        if let cadence { evidence[second].cadence = cadence }
+        if let intensity { evidence[second].intensity = intensity }
     }
 
     mutating func runClassifier(speed: Double?, at date: Date, activeTime t: TimeInterval) {
@@ -356,5 +501,88 @@ public struct RunEngine: Codable, Sendable {
                 segments[last].topSpeed = max(segments[last].topSpeed, TrackMath.medianSpeed(around: i, in: track))
             }
         }
+    }
+
+    // MARK: - Finish
+
+    /// Replaces the live track with one built from the smoothed (forward + backward)
+    /// filter states.
+    mutating func rebuildSmoothedTrack() {
+        guard let frame, !filterInputs.isEmpty else { return }
+        let states = RouteSmoother.smooth(filterInputs, config: config.filter)
+        var rebuilt: [TrackPoint] = []
+        rebuilt.reserveCapacity(track.count)
+        var total = 0.0
+        var lastEast = 0.0, lastNorth = 0.0
+        var currentLine: Int?
+
+        func append(_ m: FilterMeasurement, _ s: FilterState, newLine: Bool) {
+            let c = frame.toCoordinate(east: s.east, north: s.north)
+            rebuilt.append(TrackPoint(
+                timestamp: m.time,
+                latitude: c.latitude,
+                longitude: c.longitude,
+                altitude: m.altitude,
+                speed: m.zeroVelocity ? 0 : s.speed,
+                activeTime: m.activeTime,
+                distance: total,
+                startsNewLine: newLine
+            ))
+            lastEast = s.east
+            lastNorth = s.north
+        }
+
+        for (m, s) in zip(filterInputs, states) {
+            if m.line != currentLine {
+                currentLine = m.line
+                append(m, s, newLine: !rebuilt.isEmpty)
+                continue
+            }
+            if m.zeroVelocity { continue }
+            let step = hypot(s.east - lastEast, s.north - lastNorth)
+            guard step >= config.minStep else { continue }
+            total += step
+            append(m, s, newLine: false)
+        }
+        track = rebuilt
+        distance = total
+    }
+
+    func resegment(movingTime: TimeInterval) -> [RunSegment] {
+        let seconds = Int(movingTime.rounded(.up))
+        if seconds > 0, !evidence.isEmpty {
+            let speeds: [Double?] = (0..<seconds).map { s in
+                track.count > 1 ? TrackMath.speed(atActiveTime: Double(s) + 0.5, in: track) : nil
+            }
+            let labels = Resegmenter.labels(
+                evidence: evidence, speeds: speeds, classifier: config.classifier, config: config.resegmenter
+            )
+            return Resegmenter.segments(labels: labels, movingTime: movingTime, track: track)
+        }
+        // No evidence: keep the live segments, measured against the final track.
+        var result = segments
+        for i in result.indices {
+            result[i].startDistance = TrackMath.distance(atActiveTime: result[i].startTime, in: track)
+            result[i].endDistance = TrackMath.distance(atActiveTime: result[i].endTime, in: track)
+        }
+        if !result.isEmpty {
+            result[result.count - 1].endTime = max(movingTime, result[result.count - 1].startTime)
+            result[result.count - 1].endDistance = distance
+        }
+        return result
+    }
+
+    func averageCadence(from start: TimeInterval, to end: TimeInterval) -> Double? {
+        let lo = max(0, Int(start.rounded(.down)))
+        let hi = min(evidence.count, Int(end.rounded(.up)))
+        guard hi > lo else { return nil }
+        var sum = 0.0, count = 0
+        for i in lo..<hi {
+            if let c = evidence[i].cadence, c > 0 {
+                sum += c
+                count += 1
+            }
+        }
+        return count > 0 ? sum / Double(count) : nil
     }
 }

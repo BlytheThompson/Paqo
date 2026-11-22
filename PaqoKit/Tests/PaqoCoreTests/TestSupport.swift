@@ -24,6 +24,11 @@ struct TraceBuilder {
     var motion: [MotionActivitySample] = []
     var altitudes: [AltitudeSample] = []
     var relativeAltitude = 0.0
+    /// Half-second accelerometer batches; second i owns batches 2i and 2i+1.
+    var accelBatches: [[AccelSample]] = []
+    var includeAccel = true
+    var rng = SeededGenerator(seed: 42)
+    let startTime = t0
 
     /// Move for `seconds` at `speed` m/s. Activity and cadence follow the speed.
     mutating func move(seconds: Int, speed: Double, climb: Double = 0, accuracy: Double = 5) {
@@ -35,6 +40,17 @@ struct TraceBuilder {
             confidence: .high
         ))
         let cadence = isStill ? 0.0 : (isSprint ? 170.0 : 110.0)
+        if includeAccel {
+            let samples = syntheticAccel(
+                start: time, seconds: Double(seconds), cadence: cadence,
+                impact: isStill ? 0 : (isSprint ? 1.5 : 0.4), rng: &rng
+            )
+            var i = 0
+            while i < samples.count {
+                accelBatches.append(Array(samples[i..<min(i + 25, samples.count)]))
+                i += 25
+            }
+        }
         for _ in 0..<seconds {
             time = time.addingTimeInterval(1)
             latitude += speed / Geo.metersPerDegreeLatitude(at: latitude)
@@ -49,11 +65,33 @@ struct TraceBuilder {
                 horizontalAccuracy: accuracy,
                 verticalAccuracy: 3,
                 speed: speed,
-                speedAccuracy: 0.3
+                speedAccuracy: 0.3,
+                course: 0,
+                courseAccuracy: 5
             ))
             pedometer.append(PedometerSample(timestamp: time, steps: steps, cadence: isStill ? nil : cadence))
             altitudes.append(AltitudeSample(timestamp: time, relativeAltitude: relativeAltitude))
         }
+    }
+
+    /// Every sample as the phone would deliver it: per second, activity changes, two
+    /// accelerometer batches, altimeter, pedometer, then the GPS fix.
+    func events(includeStart: Bool = true) -> [SensorEvent] {
+        var out: [SensorEvent] = includeStart ? [.control(.start(startTime))] : []
+        var motionIndex = 0
+        for (i, fix) in fixes.enumerated() {
+            while motionIndex < motion.count && motion[motionIndex].timestamp < fix.timestamp {
+                out.append(.activity(motion[motionIndex]))
+                motionIndex += 1
+            }
+            for b in [2 * i, 2 * i + 1] where b < accelBatches.count {
+                out.append(.accelerometer(accelBatches[b]))
+            }
+            out.append(.altitude(altitudes[i]))
+            out.append(.pedometer(pedometer[i]))
+            out.append(.location(fix))
+        }
+        return out
     }
 
     /// Feed every sample to the engine in time order.

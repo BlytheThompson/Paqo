@@ -86,8 +86,10 @@ public struct RunSegment: Codable, Hashable, Sendable {
     /// Cumulative meters.
     public var startDistance: Double
     public var endDistance: Double
-    /// m/s, spike-filtered.
+    /// m/s. Peak speed: the highest 2-second average (v1 runs: 3-point median).
     public var topSpeed: Double
+    /// Steps per minute over the segment (v1.1 runs).
+    public var averageCadence: Double?
 
     public init(
         kind: SegmentKind,
@@ -95,7 +97,8 @@ public struct RunSegment: Codable, Hashable, Sendable {
         endTime: TimeInterval,
         startDistance: Double,
         endDistance: Double,
-        topSpeed: Double = 0
+        topSpeed: Double = 0,
+        averageCadence: Double? = nil
     ) {
         self.kind = kind
         self.startTime = startTime
@@ -103,6 +106,7 @@ public struct RunSegment: Codable, Hashable, Sendable {
         self.startDistance = startDistance
         self.endDistance = endDistance
         self.topSpeed = topSpeed
+        self.averageCadence = averageCadence
     }
 
     public var duration: TimeInterval { max(0, endTime - startTime) }
@@ -151,6 +155,8 @@ public struct Run: Codable, Identifiable, Hashable, Sendable {
     public var segments: [RunSegment]
     public var pauses: [PauseInterval]
     public var savedToHealth: Bool
+    /// Which detection/filter version produced this run; nil for v1 runs.
+    public var engineVersion: Int?
 
     public init(
         id: UUID = UUID(),
@@ -167,7 +173,8 @@ public struct Run: Codable, Identifiable, Hashable, Sendable {
         track: [TrackPoint] = [],
         segments: [RunSegment] = [],
         pauses: [PauseInterval] = [],
-        savedToHealth: Bool = false
+        savedToHealth: Bool = false,
+        engineVersion: Int? = nil
     ) {
         self.id = id
         self.name = name
@@ -184,6 +191,7 @@ public struct Run: Codable, Identifiable, Hashable, Sendable {
         self.segments = segments
         self.pauses = pauses
         self.savedToHealth = savedToHealth
+        self.engineVersion = engineVersion
     }
 
     public var elapsedTime: TimeInterval { max(0, endDate.timeIntervalSince(startDate)) }
